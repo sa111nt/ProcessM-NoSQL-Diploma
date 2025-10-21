@@ -16,9 +16,10 @@
     ```
 
 4. Otwórz CouchDB w przeglądarce:
-    ```
-    http://localhost:5984/
-    ```
+   ```
+   http://localhost:5984/
+   http://localhost:5984/_utils/#login
+   ```
    Login: `admin`  
    Hasło: `admin`
 
