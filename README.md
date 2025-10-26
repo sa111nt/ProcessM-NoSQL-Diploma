@@ -44,5 +44,5 @@
 
 1. Po zbudowaniu projektu dodaj parametry uruchomienia w konfiguracji run:
    ```
-   src/main/resources/logs/Hospital_Billing_Event_Log.xes
+   src/main/resources/logs/sample.xes
    ```
