@@ -13,5 +13,7 @@ data class Event(
 
     val timestamp: String? = null,
 
-    val attributes: Map<String, Any?> = emptyMap()
+    val attributes: Map<String, Any?> = emptyMap(),
+
+    val relatedObjects: Map<String, List<String>> = emptyMap()
 )

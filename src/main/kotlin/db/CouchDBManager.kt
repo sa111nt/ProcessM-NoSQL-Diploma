@@ -16,7 +16,6 @@ class CouchDBManager(
     private val user: String = "admin",
     private val password: String = "admin"
 ) {
-    // ✅ dłuższe timeouty - zapobiega SocketTimeoutException
     private val client = OkHttpClient.Builder()
         .connectTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(120, TimeUnit.SECONDS)
@@ -43,7 +42,6 @@ class CouchDBManager(
         }
     }
 
-    // ✅ batch insert — zamiast wysyłać wszystko naraz
     fun insertBulkDocs(dbName: String, docs: List<JsonObject>, batchSize: Int = 1000) {
         if (docs.isEmpty()) return
 

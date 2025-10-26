@@ -35,10 +35,14 @@
     curl -X PUT http://admin:admin@127.0.0.1:5984/_replicator -H "Content-Type: application/json" -d '{}'
     curl -X PUT http://admin:admin@127.0.0.1:5984/_global_changes -H "Content-Type: application/json" -d '{}'
     ```
+3. Usuniecie bazy danych
+   ```bash
+   curl -X DELETE "http://localhost:5984/event_logs" -u "admin:admin"
+   ```
    
 ## Dodanie parametrów uruchomienia Main.kt
 
 1. Po zbudowaniu projektu dodaj parametry uruchomienia w konfiguracji run:
    ```
-   logs/Hospital_Billing_Event_Log.xes
+   src/main/resources/logs/Hospital_Billing_Event_Log.xes
    ```

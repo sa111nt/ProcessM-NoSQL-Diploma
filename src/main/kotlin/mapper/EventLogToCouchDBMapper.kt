@@ -20,37 +20,96 @@ class EventLogToCouchDBMapper(
         val eventDocs = eventLog.events.map { toJsonDoc(it) }
         val traceDocs = eventLog.traces.map { toJsonDoc(it) }
 
-        val allDocs = eventDocs + traceDocs
+        val logDoc = toJsonDoc(eventLog)
+
+        val allDocs = eventDocs + traceDocs + listOf(logDoc)
+
         if (allDocs.isNotEmpty()) {
             val batchSize = 1000
-            allDocs.chunked(batchSize).forEachIndexed { index, chunk ->
-                println("📤 Uploading batch ${index + 1} of ${allDocs.size / batchSize + 1}")
+
+            val chunks = allDocs.chunked(batchSize)
+            val totalBatches = chunks.size
+
+            println("📦 Inserting ${allDocs.size} docs in $totalBatches batches...")
+
+            chunks.forEachIndexed { index, chunk ->
+                println("📤 Uploading batch ${index + 1} of $totalBatches (${chunk.size} documents)")
                 couchDB.insertBulkDocs(databaseName, chunk)
             }
         }
     }
 
+    private fun toJsonDoc(eventLog: EventLog): JsonObject {
+        val doc = JsonObject()
+
+        doc.addProperty("_id", "log_metadata_${eventLog.importTimestamp}")
+        doc.addProperty("docType", "log")
+
+        doc.addProperty("source", eventLog.source)
+        doc.addProperty("importTimestamp", eventLog.importTimestamp)
+
+        val attributesObject = JsonObject()
+        eventLog.attributes.forEach { (k, v) ->
+            when (v) {
+                is String -> attributesObject.addProperty(k, v)
+                is Long -> attributesObject.addProperty(k, v)
+                is Double -> attributesObject.addProperty(k, v)
+                is Boolean -> attributesObject.addProperty(k, v)
+                else -> attributesObject.addProperty(k, v?.toString())
+            }
+        }
+        doc.add("log_attributes", attributesObject)
+
+        return doc
+    }
+
     private fun toJsonDoc(event: Event): JsonObject {
         val doc = JsonObject()
+
         doc.addProperty("_id", event.id)
-        doc.addProperty("type", "event")
-        doc.addProperty("traceId", event.traceId ?: "")
-        doc.addProperty("name", event.name ?: "")
-        doc.addProperty("timestamp", event.timestamp ?: "")
-        event.attributes.forEach { (k, v) -> doc.addProperty(k, v?.toString() ?: "") }
+
+        doc.addProperty("docType", "event")
+
+        doc.addProperty("traceId", event.traceId)
+        doc.addProperty("activity", event.name)
+        doc.addProperty("timestamp", event.timestamp)
+
+        val attributesObject = JsonObject()
+        event.attributes.forEach { (k, v) ->
+            when (v) {
+                is String -> attributesObject.addProperty(k, v)
+                is Long -> attributesObject.addProperty(k, v)
+                is Double -> attributesObject.addProperty(k, v)
+                is Boolean -> attributesObject.addProperty(k, v)
+                else -> attributesObject.addProperty(k, v?.toString())
+            }
+        }
+        doc.add("xes_attributes", attributesObject)
+
         return doc
     }
 
     private fun toJsonDoc(trace: Trace): JsonObject {
         val doc = JsonObject()
         doc.addProperty("_id", trace.id)
-        doc.addProperty("type", "trace")
+        doc.addProperty("docType", "trace")
 
         val eventsArray = JsonArray()
         trace.events.forEach { eventsArray.add(it.id) }
-        doc.add("events", eventsArray)
+        doc.add("eventIds", eventsArray)
 
-        trace.attributes.forEach { (k, v) -> doc.addProperty(k, v?.toString() ?: "") }
+        val attributesObject = JsonObject()
+        trace.attributes.forEach { (k, v) ->
+            when (v) {
+                is String -> attributesObject.addProperty(k, v)
+                is Long -> attributesObject.addProperty(k, v)
+                is Double -> attributesObject.addProperty(k, v)
+                is Boolean -> attributesObject.addProperty(k, v)
+                else -> attributesObject.addProperty(k, v?.toString())
+            }
+        }
+        doc.add("xes_attributes", attributesObject)
+
         return doc
     }
 }
