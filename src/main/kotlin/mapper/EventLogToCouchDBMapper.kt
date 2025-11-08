@@ -19,14 +19,12 @@ class EventLogToCouchDBMapper(
 
         val eventDocs = eventLog.events.map { toJsonDoc(it) }
         val traceDocs = eventLog.traces.map { toJsonDoc(it) }
-
         val logDoc = toJsonDoc(eventLog)
 
         val allDocs = eventDocs + traceDocs + listOf(logDoc)
 
         if (allDocs.isNotEmpty()) {
             val batchSize = 1000
-
             val chunks = allDocs.chunked(batchSize)
             val totalBatches = chunks.size
 
@@ -41,22 +39,14 @@ class EventLogToCouchDBMapper(
 
     private fun toJsonDoc(eventLog: EventLog): JsonObject {
         val doc = JsonObject()
-
         doc.addProperty("_id", "log_metadata_${eventLog.importTimestamp}")
         doc.addProperty("docType", "log")
-
-        doc.addProperty("source", eventLog.source)
+        doc.addProperty("source", eventLog.source ?: "unknown")
         doc.addProperty("importTimestamp", eventLog.importTimestamp)
 
         val attributesObject = JsonObject()
         eventLog.attributes.forEach { (k, v) ->
-            when (v) {
-                is String -> attributesObject.addProperty(k, v)
-                is Long -> attributesObject.addProperty(k, v)
-                is Double -> attributesObject.addProperty(k, v)
-                is Boolean -> attributesObject.addProperty(k, v)
-                else -> attributesObject.addProperty(k, v?.toString())
-            }
+            addJsonProperty(attributesObject, k, v)
         }
         doc.add("log_attributes", attributesObject)
 
@@ -65,25 +55,14 @@ class EventLogToCouchDBMapper(
 
     private fun toJsonDoc(event: Event): JsonObject {
         val doc = JsonObject()
-
         doc.addProperty("_id", event.id)
-
         doc.addProperty("docType", "event")
-
         doc.addProperty("traceId", event.traceId)
         doc.addProperty("activity", event.name)
         doc.addProperty("timestamp", event.timestamp)
 
         val attributesObject = JsonObject()
-        event.attributes.forEach { (k, v) ->
-            when (v) {
-                is String -> attributesObject.addProperty(k, v)
-                is Long -> attributesObject.addProperty(k, v)
-                is Double -> attributesObject.addProperty(k, v)
-                is Boolean -> attributesObject.addProperty(k, v)
-                else -> attributesObject.addProperty(k, v?.toString())
-            }
-        }
+        event.attributes.forEach { (k, v) -> addJsonProperty(attributesObject, k, v) }
         doc.add("xes_attributes", attributesObject)
 
         return doc
@@ -99,17 +78,18 @@ class EventLogToCouchDBMapper(
         doc.add("eventIds", eventsArray)
 
         val attributesObject = JsonObject()
-        trace.attributes.forEach { (k, v) ->
-            when (v) {
-                is String -> attributesObject.addProperty(k, v)
-                is Long -> attributesObject.addProperty(k, v)
-                is Double -> attributesObject.addProperty(k, v)
-                is Boolean -> attributesObject.addProperty(k, v)
-                else -> attributesObject.addProperty(k, v?.toString())
-            }
-        }
+        trace.attributes.forEach { (k, v) -> addJsonProperty(attributesObject, k, v) }
         doc.add("xes_attributes", attributesObject)
 
         return doc
+    }
+
+    private fun addJsonProperty(obj: JsonObject, key: String, value: Any?) {
+        when (value) {
+            is String -> obj.addProperty(key, value)
+            is Number -> obj.addProperty(key, value)
+            is Boolean -> obj.addProperty(key, value)
+            else -> obj.addProperty(key, value?.toString())
+        }
     }
 }
