@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<log>
+  <string key="concept:name" value="TestLog"/>
+  <trace>
+    <string key="concept:name" value="Case_1"/>
+    <event>
+      <string key="concept:name" value="Start"/>
+      <date key="time:timestamp" value="2020-01-01T10:00:00.000Z"/>
+    </event>
+    <event>
+      <string key="concept:name" value="Approve"/>
+      <date key="time:timestamp" value="2020-01-01T11:00:00.000Z"/>
+    </event>
+  </trace>
+  <trace>
+    <string key="concept:name" value="Case_2"/>
+    <event>
+      <string key="concept:name" value="Start"/>
+      <date key="time:timestamp" value="2020-02-01T09:00:00.000Z"/>
+    </event>
+  </trace>
+</log>

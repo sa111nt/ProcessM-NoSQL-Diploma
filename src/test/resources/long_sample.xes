@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<log>
+  <string key="concept:name" value="LoanApplicationLog"/>
+
+  <trace>
+    <string key="concept:name" value="Case_001"/>
+    <event>
+      <string key="concept:name" value="Start Application"/>
+      <date key="time:timestamp" value="2021-01-01T08:00:00.000Z"/>
+    </event>
+    <event>
+      <string key="concept:name" value="Submit Documents"/>
+      <date key="time:timestamp" value="2021-01-01T09:00:00.000Z"/>
+    </event>
+    <event>
+      <string key="concept:name" value="Approve Loan"/>
+      <date key="time:timestamp" value="2021-01-01T10:00:00.000Z"/>
+    </event>
+  </trace>
+
+  <trace>
+    <string key="concept:name" value="Case_002"/>
+    <event>
+      <string key="concept:name" value="Start Application"/>
+      <date key="time:timestamp" value="2021-01-02T08:15:00.000Z"/>
+    </event>
+    <event>
+      <string key="concept:name" value="Reject Loan"/>
+      <date key="time:timestamp" value="2021-01-02T09:00:00.000Z"/>
+    </event>
+  </trace>
+
+  <trace>
+    <string key="concept:name" value="Case_003"/>
+    <event>
+      <string key="concept:name" value="Start Application"/>
+      <date key="time:timestamp" value="2021-01-03T08:45:00.000Z"/>
+    </event>
+    <event>
+      <string key="concept:name" value="Submit Documents"/>
+      <date key="time:timestamp" value="2021-01-03T09:30:00.000Z"/>
+    </event>
+    <event>
+      <string key="concept:name" value="Verify Income"/>
+      <date key="time:timestamp" value="2021-01-03T10:15:00.000Z"/>
+    </event>
+    <event>
+      <string key="concept:name" value="Approve Loan"/>
+      <date key="time:timestamp" value="2021-01-03T11:00:00.000Z"/>
+    </event>
+  </trace>
+
+  <trace>
+    <string key="concept:name" value="Case_004"/>
+    <event>
+      <string key="concept:name" value="Start Application"/>
+      <date key="time:timestamp" value="2021-01-04T07:50:00.000Z"/>
+    </event>
+    <event>
+      <string key="concept:name" value="Submit Documents"/>
+      <date key="time:timestamp" value="2021-01-04T08:10:00.000Z"/>
+    </event>
+    <event>
+      <string key="concept:name" value="Verify Income"/>
+      <date key="time:timestamp" value="2021-01-04T09:00:00.000Z"/>
+    </event>
+    <event>
+      <string key="concept:name" value="Reject Loan"/>
+      <date key="time:timestamp" value="2021-01-04T10:00:00.000Z"/>
+    </event>
+  </trace>
+
+  <trace>
+    <string key="concept:name" value="Case_005"/>
+    <event>
+      <string key="concept:name" value="Start Application"/>
+      <date key="time:timestamp" value="2021-01-05T09:00:00.000Z"/>
+    </event>
+    <event>
+      <string key="concept:name" value="Submit Documents"/>
+      <date key="time:timestamp" value="2021-01-05T09:30:00.000Z"/>
+    </event>
+  </trace>
+</log>
