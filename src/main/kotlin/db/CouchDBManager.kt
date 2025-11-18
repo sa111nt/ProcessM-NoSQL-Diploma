@@ -24,6 +24,7 @@ class CouchDBManager(
 
     private val gson = Gson()
     private val auth = Credentials.basic(user, password)
+    private val ensuredIndexes = mutableSetOf<String>()
 
     fun createDatabase(dbName: String) {
         val emptyBody = ByteArray(0).toRequestBody(null, 0, 0)
@@ -68,6 +69,58 @@ class CouchDBManager(
                 } else {
                     println("✅ Inserted batch ${index + 1}/${chunks.size} (${chunk.size} docs)")
                 }
+            }
+        }
+    }
+
+    fun findDocs(dbName: String, query: JsonObject): JsonArray {
+        val body: RequestBody = gson.toJson(query)
+            .toRequestBody("application/json".toMediaTypeOrNull())
+
+        val request = Request.Builder()
+            .post(body)
+            .url("$url/$dbName/_find")
+            .header("Authorization", auth)
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                error("❌ Error querying database: ${response.code} ${response.message}")
+            }
+            val jsonResponse = gson.fromJson(response.body?.charStream(), JsonObject::class.java)
+            return jsonResponse.getAsJsonArray("docs")
+        }
+    }
+
+    fun ensureIndex(dbName: String, fields: List<String>) {
+        if (fields.isEmpty()) return
+        val signature = "$dbName:${fields.joinToString(",")}"
+        if (!ensuredIndexes.add(signature)) {
+            return
+        }
+
+        val bodyJson = JsonObject().apply {
+            add("index", JsonObject().apply {
+                val fieldsArray = JsonArray()
+                fields.forEach { fieldsArray.add(it) }
+                add("fields", fieldsArray)
+            })
+            addProperty("type", "json")
+            addProperty("name", "idx_${fields.joinToString("_")}")
+        }
+
+        val body: RequestBody = gson.toJson(bodyJson)
+            .toRequestBody("application/json".toMediaTypeOrNull())
+
+        val request = Request.Builder()
+            .post(body)
+            .url("$url/$dbName/_index")
+            .header("Authorization", auth)
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful && response.code != 409) {
+                error("❌ Error creating index: ${response.code} ${response.message}")
             }
         }
     }

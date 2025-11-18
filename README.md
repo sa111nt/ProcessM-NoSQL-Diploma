@@ -46,3 +46,21 @@
    ```
    src/main/resources/logs/sample.xes
    ```
+
+## Konsolowy interpreter PQL
+
+1. Upewnij się, że CouchDB jest uruchomiona i zawiera dane (np. po imporcie XES).
+2. Uruchom aplikację z parametrem `--pql`:
+3. Zapytania kończ średnikiem `;`. Wspierany dialect używa prefiksów scope:
+   - `l:` / `log` – atrybuty logu,
+   - `t:` / `trace` – atrybuty śladu,
+   - `e:` / `event` – atrybuty zdarzenia.
+4. Przykład:
+   ```
+   select e:concept:name, e:timestamp
+   from events
+   where e:concept:name = 'pay compensation'
+   order by e:timestamp desc
+   limit 5;
+   ```
+5. Wyjście z interpretera — komenda `exit`.

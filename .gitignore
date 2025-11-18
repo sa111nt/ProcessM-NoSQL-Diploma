@@ -4,6 +4,7 @@ build/
 !**/src/main/**/build/
 !**/src/test/**/build/
 !**/src/main/resources/Hospital_Billing_Event_log.xes
+!**/src/main/resources/review_example_large.xes
 
 ### IntelliJ IDEA ###
 .idea/modules.xml
