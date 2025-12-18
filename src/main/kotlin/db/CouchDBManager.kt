@@ -124,4 +124,47 @@ class CouchDBManager(
             }
         }
     }
+    
+    fun deleteDocs(dbName: String, query: JsonObject): Int {
+        // First, find documents matching the query
+        val docs = findDocs(dbName, query)
+        
+        if (docs.isEmpty()) {
+            return 0
+        }
+        
+        // Prepare bulk delete request
+        val deleteDocs = JsonArray()
+        docs.forEach { doc ->
+            val docObj = doc.asJsonObject
+            val deleteDoc = JsonObject().apply {
+                addProperty("_id", docObj.get("_id").asString)
+                addProperty("_rev", docObj.get("_rev").asString)
+                addProperty("_deleted", true)
+            }
+            deleteDocs.add(deleteDoc)
+        }
+        
+        val bulkBody = JsonObject().apply {
+            add("docs", deleteDocs)
+        }
+        
+        val body: RequestBody = gson.toJson(bulkBody)
+            .toRequestBody("application/json".toMediaTypeOrNull())
+        
+        val request = Request.Builder()
+            .post(body)
+            .url("$url/$dbName/_bulk_docs")
+            .header("Authorization", auth)
+            .build()
+        
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                error("❌ Error deleting documents: ${response.code} ${response.message}")
+            }
+            val jsonResponse = gson.fromJson(response.body?.charStream(), JsonArray::class.java)
+            // Count successful deletions (documents without "error" field)
+            return jsonResponse.count { !it.asJsonObject.has("error") }
+        }
+    }
 }

@@ -58,9 +58,13 @@
 4. Przykład:
    ```
    select e:concept:name, e:timestamp
-   from events
    where e:concept:name = 'pay compensation'
    order by e:timestamp desc
    limit 5;
    ```
+   
+   **Uwaga:** W PQL nie używa się klauzuli `FROM` - scope jest określany automatycznie z prefiksów atrybutów:
+   - `e:` = events (zdarzenia)
+   - `t:` = traces (ślady)
+   - `l:` = logs (logi)
 5. Wyjście z interpretera — komenda `exit`.
