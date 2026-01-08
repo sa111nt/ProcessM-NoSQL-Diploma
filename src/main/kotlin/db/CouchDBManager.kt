@@ -1,105 +1,120 @@
 package db
 
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody
-import okhttp3.Credentials
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.toRequestBody
+import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
-import com.google.gson.Gson
+import com.google.gson.JsonParser
+import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-class CouchDBManager(
-    private val url: String = "http://localhost:5984",
+open class CouchDBManager(
+    // 1. Czysty URL bez loginu/hasła
+    private val url: String = "http://127.0.0.1:5984",
     private val user: String = "admin",
+    // 2. POPRAWKA: Hasło zgodne z docker-compose.yml
     private val password: String = "admin"
 ) {
+    private val maxConcurrency = 10
+    private val gson = Gson()
+    private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+    // 3. Generujemy nagłówek Basic Auth raz
+    private val authHeader = Credentials.basic(user, password)
+    private val ensuredIndexes = mutableSetOf<String>()
+
     private val client = OkHttpClient.Builder()
+        .dispatcher(Dispatcher().apply {
+            maxRequests = maxConcurrency
+            maxRequestsPerHost = maxConcurrency
+        })
+        .connectionPool(ConnectionPool(maxConcurrency, 5, TimeUnit.MINUTES))
         .connectTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(120, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 
-    private val gson = Gson()
-    private val auth = Credentials.basic(user, password)
-    private val ensuredIndexes = mutableSetOf<String>()
-
-    fun createDatabase(dbName: String) {
-        val emptyBody = ByteArray(0).toRequestBody(null, 0, 0)
+    /**
+     * Tworzy nową bazę danych.
+     */
+    open fun createDb(dbName: String) {
+        val emptyBody = "".toRequestBody(null)
         val request = Request.Builder()
             .put(emptyBody)
             .url("$url/$dbName")
-            .header("Authorization", auth)
+            .header("Authorization", authHeader) // Zawsze dodajemy nagłówek
             .build()
 
-        client.newCall(request).execute().use { response ->
-            when {
-                response.isSuccessful -> println("✅ Database created: $dbName")
-                response.code == 412 -> println("ℹ️ Database '$dbName' already exists")
-                else -> error("❌ Error (${response.code}): ${response.message}")
-            }
-        }
-    }
-
-    fun insertBulkDocs(dbName: String, docs: List<JsonObject>, batchSize: Int = 1000) {
-        if (docs.isEmpty()) return
-
-        val chunks = docs.chunked(batchSize)
-        println("📦 Inserting ${docs.size} docs in ${chunks.size} batches...")
-
-        chunks.forEachIndexed { index, chunk ->
-            val bulkBody = JsonObject().apply {
-                add("docs", JsonArray().apply { chunk.forEach { add(it) } })
-            }
-
-            val body: RequestBody = gson.toJson(bulkBody)
-                .toRequestBody("application/json".toMediaTypeOrNull())
-
-            val request = Request.Builder()
-                .post(body)
-                .url("$url/$dbName/_bulk_docs")
-                .header("Authorization", auth)
-                .build()
-
+        try {
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    error("❌ Error inserting batch ${index + 1}: ${response.code} ${response.message}")
-                } else {
-                    println("✅ Inserted batch ${index + 1}/${chunks.size} (${chunk.size} docs)")
+                // 412 = Precondition Failed (Baza już istnieje) - to nie jest błąd
+                if (!response.isSuccessful && response.code != 412) {
+                    throw IOException("Błąd tworzenia bazy '$dbName'. Kod: ${response.code} (${response.message})")
                 }
             }
+        } catch (e: Exception) {
+            throw IOException("Nie udało się połączyć z CouchDB ($url). Sprawdź czy kontener działa.", e)
         }
     }
 
-    fun findDocs(dbName: String, query: JsonObject): JsonArray {
-        val body: RequestBody = gson.toJson(query)
-            .toRequestBody("application/json".toMediaTypeOrNull())
+    /**
+     * Wstawia dokumenty w trybie Batch.
+     */
+    open fun insertBulkDocsRaw(dbName: String, jsonBytes: ByteArray) {
+        val requestBody = jsonBytes.toRequestBody(JSON_MEDIA_TYPE)
 
         val request = Request.Builder()
-            .post(body)
-            .url("$url/$dbName/_find")
-            .header("Authorization", auth)
+            .post(requestBody)
+            .url("$url/$dbName/_bulk_docs")
+            .header("Authorization", authHeader)
             .build()
 
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
-                error("❌ Error querying database: ${response.code} ${response.message}")
+                throw IOException("Błąd zapisu batcha: ${response.code} ${response.message}")
             }
-            val jsonResponse = gson.fromJson(response.body?.charStream(), JsonObject::class.java)
-            return jsonResponse.getAsJsonArray("docs")
         }
     }
 
-    fun ensureIndex(dbName: String, fields: List<String>) {
+    /**
+     * Wykonuje zapytanie Mango (JSON selector).
+     */
+    open fun findDocs(dbName: String, mangoQuery: JsonObject): JsonArray {
+        val requestBody = gson.toJson(mangoQuery).toRequestBody(JSON_MEDIA_TYPE)
+
+        val request = Request.Builder()
+            .post(requestBody)
+            .url("$url/$dbName/_find")
+            .header("Authorization", authHeader)
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IOException("Błąd zapytania _find: ${response.code} ${response.message}")
+            }
+
+            val responseString = response.body?.string() ?: "{}"
+            val root = JsonParser.parseString(responseString).asJsonObject
+
+            return if (root.has("docs")) {
+                root.getAsJsonArray("docs")
+            } else {
+                JsonArray()
+            }
+        }
+    }
+
+    /**
+     * Tworzy indeks dla przyspieszenia zapytań.
+     */
+    open fun ensureIndex(dbName: String, fields: List<String>) {
         if (fields.isEmpty()) return
         val signature = "$dbName:${fields.joinToString(",")}"
-        if (!ensuredIndexes.add(signature)) {
-            return
-        }
+        if (!ensuredIndexes.add(signature)) return
 
-        val bodyJson = JsonObject().apply {
+        val indexDef = JsonObject().apply {
             add("index", JsonObject().apply {
                 val fieldsArray = JsonArray()
                 fields.forEach { fieldsArray.add(it) }
@@ -109,62 +124,68 @@ class CouchDBManager(
             addProperty("name", "idx_${fields.joinToString("_")}")
         }
 
-        val body: RequestBody = gson.toJson(bodyJson)
-            .toRequestBody("application/json".toMediaTypeOrNull())
-
+        val body = gson.toJson(indexDef).toRequestBody(JSON_MEDIA_TYPE)
         val request = Request.Builder()
             .post(body)
             .url("$url/$dbName/_index")
-            .header("Authorization", auth)
+            .header("Authorization", authHeader)
             .build()
 
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful && response.code != 409) {
-                error("❌ Error creating index: ${response.code} ${response.message}")
+                println("⚠️ Ostrzeżenie: Nie udało się utworzyć indeksu $fields: ${response.code}")
             }
         }
     }
-    
-    fun deleteDocs(dbName: String, query: JsonObject): Int {
-        // First, find documents matching the query
-        val docs = findDocs(dbName, query)
-        
-        if (docs.isEmpty()) {
-            return 0
+
+    /**
+     * Usuwa dokumenty pasujące do zapytania.
+     */
+    open fun deleteDocs(dbName: String, query: JsonObject): Int {
+        if (!query.has("fields")) {
+            query.add("fields", JsonArray().apply {
+                add("_id")
+                add("_rev")
+            })
         }
-        
-        // Prepare bulk delete request
-        val deleteDocs = JsonArray()
-        docs.forEach { doc ->
+        if (!query.has("limit")) {
+            query.addProperty("limit", 100000)
+        }
+
+        val docsToDelete = findDocs(dbName, query)
+        if (docsToDelete.isEmpty) return 0
+
+        val bulkArray = JsonArray()
+        docsToDelete.forEach { doc ->
             val docObj = doc.asJsonObject
-            val deleteDoc = JsonObject().apply {
-                addProperty("_id", docObj.get("_id").asString)
-                addProperty("_rev", docObj.get("_rev").asString)
+            val deleteItem = JsonObject().apply {
+                add("_id", docObj.get("_id"))
+                add("_rev", docObj.get("_rev"))
                 addProperty("_deleted", true)
             }
-            deleteDocs.add(deleteDoc)
+            bulkArray.add(deleteItem)
         }
-        
-        val bulkBody = JsonObject().apply {
-            add("docs", deleteDocs)
-        }
-        
-        val body: RequestBody = gson.toJson(bulkBody)
-            .toRequestBody("application/json".toMediaTypeOrNull())
-        
+
+        val bulkBodyJson = JsonObject().apply { add("docs", bulkArray) }
+        val requestBody = gson.toJson(bulkBodyJson).toRequestBody(JSON_MEDIA_TYPE)
+
         val request = Request.Builder()
-            .post(body)
+            .post(requestBody)
             .url("$url/$dbName/_bulk_docs")
-            .header("Authorization", auth)
+            .header("Authorization", authHeader)
             .build()
-        
+
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                error("❌ Error deleting documents: ${response.code} ${response.message}")
-            }
-            val jsonResponse = gson.fromJson(response.body?.charStream(), JsonArray::class.java)
-            // Count successful deletions (documents without "error" field)
-            return jsonResponse.count { !it.asJsonObject.has("error") }
+            if (!response.isSuccessful) error("❌ Błąd usuwania: ${response.code}")
+
+            val respString = response.body?.string() ?: "[]"
+            val respArray = JsonParser.parseString(respString).asJsonArray
+            return respArray.count { !it.asJsonObject.has("error") }
         }
+    }
+
+    open fun close() {
+        client.dispatcher.executorService.shutdown()
+        client.connectionPool.evictAll()
     }
 }

@@ -1,7 +1,8 @@
-package pql
+package pql.translator
 
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
+import pql.model.*
 
 class PqlToCouchDbTranslator(
     private val fieldMapper: PqlFieldMapper = PqlFieldMapper()

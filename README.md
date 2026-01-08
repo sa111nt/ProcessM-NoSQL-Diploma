@@ -27,7 +27,7 @@
 
 1. Wejdź do kontenera CouchDB
     ```bash
-   docker exec -it docker-couchdb-1 bash
+   docker exec -it processm_couchdb bash
     ```
 2. Utwórz bazy danych `_users`, `_replicator` oraz `_global_changes`:
     ```bash
@@ -35,7 +35,12 @@
     curl -X PUT http://admin:admin@127.0.0.1:5984/_replicator -H "Content-Type: application/json" -d '{}'
     curl -X PUT http://admin:admin@127.0.0.1:5984/_global_changes -H "Content-Type: application/json" -d '{}'
     ```
-3. Usuniecie bazy danych
+3. Optymalizacja
+   ```bash
+   curl -X PUT http://admin:admin@127.0.0.1:5984/_node/_local/_config/couchdb/delayed_commits -d '"true"'
+   curl -X PUT http://admin:admin@127.0.0.1:5984/_node/_local/_config/httpd/max_http_request_size -d '"4294967296"
+    ```
+4. Usuniecie bazy danych
    ```bash
    curl -X DELETE "http://localhost:5984/event_logs" -u "admin:admin"
    ```

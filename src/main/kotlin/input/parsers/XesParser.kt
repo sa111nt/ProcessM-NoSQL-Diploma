@@ -2,51 +2,70 @@ package input.parsers
 
 import model.Event
 import model.Trace
-import model.EventLog
 import java.io.File
+import java.util.UUID
 import javax.xml.stream.XMLInputFactory
 import javax.xml.stream.XMLStreamConstants
 import javax.xml.stream.XMLStreamReader
-import java.util.UUID
 
-// Definiujemy interfejs XESInputStream, żeby móc łatwo iterować (jak w drugim projekcie)
-interface XESInputStream : Iterator<Any> // Zastąp Any rzeczywistymi klasami Log/Trace/Event
+// Interfejs definiujący nasz parser jako Iterator.
+// Dzięki temu możemy używać go w pętli 'for' lub w 'mapper.map(parser)'.
+interface XESInputStream : Iterator<XESComponent>
 
-// Użyjemy koncepcji StAX (pull parser), bo jest to bardziej nowoczesna alternatywa dla SAX
 class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
 
+    // Konstruktor pomocniczy dla plików
     constructor(file: File) : this(
         XMLInputFactory.newDefaultFactory().createXMLStreamReader(file.inputStream())
     )
 
-    private var nextComponent: Any? = null // Używamy Any jako uproszczenia
+    // Bufor na następny element.
+    // Parser działa w trybie "pull" (wyciągania), więc musimy zajrzeć do przodu,
+    // co jest w pliku, zapisać to tutaj i oddać, gdy ktoś zawoła next().
+    private var nextComponent: XESComponent? = null
 
+    // 1. LOGIKA GŁÓWNA ITERATORA
+    // Ta metoda decyduje, czy czytać dalej, czy skończyć.
     override fun hasNext(): Boolean {
+        // Jeśli mamy coś w buforze, to znaczy, że jest co zwracać.
         if (nextComponent != null) return true
 
-        // Szukaj następnego elementu, który może być Log, Trace lub Event
+        // Tutaj był error
+        // Sprawdzamy, czy kursor parsera nie zatrzymał się już na tagu <trace>
+        // (np. po wyjściu z metody parseLogAttributes).
+        // Jeśli tak, parsujemy ślad OD RAZU, bez wywoływania reader.next(),
+        // które przesunęłoby nas za daleko i zgubiłoby pierwszy ślad.
+        if (reader.eventType == XMLStreamConstants.START_ELEMENT && reader.localName == "trace") {
+            nextComponent = XESTrace(parseTrace())
+            return true
+        }
+
+        // Pętla czyta surowy XML, dopóki nie znajdzie czegoś ciekawego (Log lub Trace)
         while (reader.hasNext()) {
             when (reader.next()) {
                 XMLStreamConstants.START_ELEMENT -> {
-                    val localName = reader.localName
+                    val name = reader.localName
 
-                    if (localName == "log") {
-                        // Dla uproszczenia zwracamy tylko atrybuty logu, a nie cały Log
-                        nextComponent = parseLogAttributes()
-                        return true
-                    } else if (localName == "trace") {
-                        nextComponent = parseTrace()
+                    // Jeśli trafiliśmy na początek pliku <log> -> parsujemy atrybuty globalne
+                    if (name == "log") {
+                        nextComponent = XESLogAttributes(parseLogAttributes())
                         return true
                     }
-                    // Możesz tu dodać parsowanie eventów, jeśli chcesz je streamować bez śladów
+                    // Jeśli trafiliśmy na <trace> -> parsujemy cały ślad wraz ze zdarzeniami
+                    else if (name == "trace") {
+                        nextComponent = XESTrace(parseTrace())
+                        return true
+                    }
                 }
+                // Koniec pliku XML -> kończymy iterator
                 XMLStreamConstants.END_DOCUMENT -> return false
             }
         }
         return false
     }
 
-    override fun next(): Any {
+    // Zwraca przygotowany wcześniej element i czyści bufor
+    override fun next(): XESComponent {
         if (nextComponent != null || hasNext()) {
             val result = nextComponent!!
             nextComponent = null
@@ -55,144 +74,124 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
         throw NoSuchElementException()
     }
 
-    // Zaimplementuj funkcję do parsowania atrybutów logu
+    // 2. PARSOWANIE ATRYBUTÓW LOGU (Nagłówek)
+    // Czyta wszystko wewnątrz <log>...</log> ZANIM wystąpi pierwszy <trace>.
     private fun parseLogAttributes(): Map<String, Any?> {
         val attributes = mutableMapOf<String, Any?>()
-
         while (reader.hasNext()) {
-            reader.next()
+            reader.next() // Przesuwamy kursor
+
             if (reader.isStartElement) {
-                // Ta sekcja musi czytać tagi atrybutów: <string>, <date> itp.
-                if (reader.localName in setOf("string", "date", "int", "float", "boolean")) {
+                val name = reader.localName
+                // XES definiuje typy danych jako tagi: <string key="..." value="..."/>
+                if (name in setOf("string", "date", "int", "float", "boolean")) {
                     val key = reader.getAttributeValue(null, "key")
-                    val valueString = reader.getAttributeValue(null, "value")
-                    attributes[key] = castValue(reader.localName, valueString)
-                } else if (reader.localName == "trace") {
-                    // Osiągnęliśmy pierwszy <trace>, więc wychodzimy, by zwrócić Log
+                    val value = reader.getAttributeValue(null, "value")
+                    attributes[key] = castValue(name, value)
+                }
+                // Jeśli trafimy na <trace>, to znaczy, że atrybuty logu się skończyły.
+                // Przerywamy i zwracamy atrybuty. Kursor zostaje na tagu <trace>,
+                // co zostanie obsłużone przez poprawiony 'hasNext()'.
+                else if (name == "trace") {
                     return attributes
                 }
-            } else if (reader.isEndElement && reader.localName == "log") {
-                return attributes
-            }
+            } else if (reader.isEndElement && reader.localName == "log") return attributes
         }
         return attributes
     }
 
-    // Zaimplementuj funkcję do parsowania pojedynczego śladu (Trace)
+    // 3. PARSOWANIE ŚLADU (Trace)
+    // To jest wywoływane tysiące razy. Tworzy obiekt Trace zawierający listę Eventów.
     private fun parseTrace(): Trace {
         val traceAttributes = mutableMapOf<String, Any?>()
         val events = mutableListOf<Event>()
         var traceId: String? = null
 
+        // Czytamy XML wewnątrz tagu <trace>...</trace>
         while (reader.hasNext()) {
             reader.next()
-
             if (reader.isStartElement) {
-                val localName = reader.localName
-                if (localName in setOf("string", "date", "int", "float", "boolean")) {
-                    val key = reader.getAttributeValue(null, "key")
-                    val valueString = reader.getAttributeValue(null, "value")
-                    val value = castValue(localName, valueString)
+                val name = reader.localName
 
+                // Atrybuty samego śladu (np. concept:name to zazwyczaj ID śladu)
+                if (name in setOf("string", "date", "int", "float", "boolean")) {
+                    val key = reader.getAttributeValue(null, "key")
+                    val value = castValue(name, reader.getAttributeValue(null, "value"))
+
+                    // Wyciągamy ID śladu
                     if (key == "concept:name") traceId = value?.toString()
                     traceAttributes[key] = value
-
-                } else if (localName == "event") {
-                    events.add(parseEvent(traceId ?: "unknown"))
                 }
-            } else if (reader.isEndElement && reader.localName == "trace") {
-                // Zakończyliśmy parsowanie śladu
-                break
+                // Jeśli trafimy na <event>, odpalamy parser zdarzenia
+                else if (name == "event") {
+                    // Przekazujemy traceId do eventu, żeby wiedział do kogo należy (Relacyjność)
+                    events.add(parseEvent(traceId ?: "unknown_trace"))
+                }
             }
+            // Koniec tagu </trace> -> przerywamy pętlę i zwracamy gotowy obiekt
+            else if (reader.isEndElement && reader.localName == "trace") break
         }
 
         return Trace(
-            id = traceId ?: "trace_${System.currentTimeMillis()}", // Lepsze ID
+            // ZMIANA: UUID zapewnia unikalność, nawet jak w pliku XES brakuje ID
+            id = traceId ?: "trace_${UUID.randomUUID()}",
             attributes = traceAttributes,
             events = events
         )
     }
 
-    // Zaimplementuj funkcję do parsowania pojedynczego zdarzenia (Event)
+    // 4. PARSOWANIE ZDARZENIA (Event)
+    // Czyta pojedynczy tag <event>...</event>
     private fun parseEvent(traceId: String): Event {
-        val eventAttributes = mutableMapOf<String, Any?>()
-        var eventName: String? = null
+        val attrs = mutableMapOf<String, Any?>()
+        var name: String? = null
         var timestamp: String? = null
         var eventId: String? = null
 
-        // Przeskakujemy na następny element, aby zacząć czytać atrybuty <event>
-        var isReadingAttributes = true
-
-        while (reader.hasNext() && isReadingAttributes) {
+        var reading = true
+        while (reader.hasNext() && reading) {
             reader.next()
-
             if (reader.isStartElement) {
-                val localName = reader.localName
-                if (localName in setOf("string", "date", "int", "float", "boolean")) {
+                val tag = reader.localName
+                // Wyciąganie atrybutów zdarzenia (nazwa czynności, czas, koszt itp.)
+                if (tag in setOf("string", "date", "int", "float", "boolean")) {
                     val key = reader.getAttributeValue(null, "key")
-                    val valueString = reader.getAttributeValue(null, "value")
-                    val value = castValue(localName, valueString)
+                    val value = castValue(tag, reader.getAttributeValue(null, "value"))
 
+                    // Mapowanie kluczowych pól standardu XES
                     when (key) {
-                        "concept:name" -> eventName = value?.toString()
+                        "concept:name" -> name = value?.toString()
                         "time:timestamp" -> timestamp = value?.toString()
                         "id" -> eventId = value?.toString()
                     }
-                    eventAttributes[key] = value
-
-                } else {
-                    // Nieoczekiwany tag wewnątrz eventu, obsługa błędu lub ignorowanie
+                    attrs[key] = value
                 }
-            } else if (reader.isEndElement && reader.localName == "event") {
-                isReadingAttributes = false
             }
+            // Koniec tagu </event>
+            else if (reader.isEndElement && reader.localName == "event") reading = false
         }
 
         return Event(
+            // ZMIANA: Generujemy unikalne ID: TraceID + UUID, żeby uniknąć kolizji w bazie
             id = eventId ?: "${traceId}_event_${UUID.randomUUID()}",
             traceId = traceId,
-            name = eventName,
+            name = name,
             timestamp = timestamp,
-            attributes = eventAttributes
+            attributes = attrs
         )
     }
 
-    // Przenieś logikę konwersji typów
-    private fun castValue(tagName: String, valueString: String?): Any? {
-        if (valueString == null) return null
-        return when (tagName) {
-            "string", "date" -> valueString
-            "int" -> valueString.toLongOrNull()
-            "float" -> valueString.toDoubleOrNull()
-            "boolean" -> valueString.toBooleanStrictOrNull()
-            else -> null
+    // 5. KONWERSJA TYPÓW (Helper)
+    // Standard XES definiuje typy w XMLu (np. <int value="5"/>).
+    // Musimy to zamienić ze Stringa na typy Kotlina/Javy.
+    private fun castValue(tag: String, value: String?): Any? {
+        if (value == null) return null
+        return when (tag) {
+            "string", "date" -> value // Datę zostawiamy jako String (ISO-8601), baza sobie poradzi
+            "int" -> value.toLongOrNull()
+            "float" -> value.toDoubleOrNull()
+            "boolean" -> value.toBooleanStrictOrNull()
+            else -> value
         }
-    }
-
-    // Twoja funkcja `parse` musiałaby zostać zmieniona, aby korzystać z tej klasy iteracyjnie:
-    fun parseFileToLog(file: File): EventLog {
-        val staxParser = StaxXesParser(file)
-        val allEvents = mutableListOf<Event>()
-        val traces = mutableListOf<Trace>()
-        var logAttributes: Map<String, Any?>? = null
-
-        // Iterujemy przez komponenty (Log Attributes, Trace, Event...)
-        staxParser.forEach { component ->
-            when (component) {
-                is Map<*, *> -> logAttributes = component as Map<String, Any?>
-                is Trace -> {
-                    traces.add(component)
-                    allEvents.addAll(component.events)
-                }
-                // Opcjonalnie: Obsługa pojedynczych Eventów poza Trace
-                // is Event -> allEvents.add(component)
-            }
-        }
-
-        return EventLog(
-            events = allEvents,
-            traces = traces,
-            attributes = logAttributes ?: emptyMap()
-        )
     }
 }

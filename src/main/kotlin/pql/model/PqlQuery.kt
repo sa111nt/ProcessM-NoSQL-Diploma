@@ -1,4 +1,4 @@
-package pql
+package pql.model
 
 data class PqlQuery(
     val collection: PqlScope,

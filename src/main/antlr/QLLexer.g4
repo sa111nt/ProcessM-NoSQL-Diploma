@@ -1,9 +1,4 @@
 lexer grammar QLLexer;
-
-@header {
-package ql;
-}
-
 // Lexer rules start with uppercase letters
 tokens {STRING}
 @lexer::members {

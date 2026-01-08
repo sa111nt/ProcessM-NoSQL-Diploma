@@ -1,10 +1,5 @@
 parser grammar QLParser;
-
-@header {
-package ql;
-}
 options { tokenVocab=QLLexer; }
-
 // Process Query Language
 // See https://github.com/ProcessMPUT/processm/blob/master/docs/pql.md for language details.
 

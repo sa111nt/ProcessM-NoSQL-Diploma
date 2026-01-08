@@ -1,11 +1,17 @@
 version: '3'
 services:
   couchdb:
-    image: couchdb:3.5
+    image: couchdb:3.3.3
+    container_name: processm_couchdb
     environment:
       - COUCHDB_USER=admin
       - COUCHDB_PASSWORD=admin
     ports:
       - "5984:5984"
     volumes:
-      - ./wait-for-couchdb.sh:/docker-entrypoint-initdb.d/init.sh
+      - couchdb_data:/opt/couchdb/data
+      - ./init.sh:/opt/couchdb/init.sh
+    entrypoint: ["/bin/bash", "-c", "chmod +x /opt/couchdb/init.sh && /opt/couchdb/init.sh & /docker-entrypoint.sh /opt/couchdb/bin/couchdb"]
+
+volumes:
+  couchdb_data:

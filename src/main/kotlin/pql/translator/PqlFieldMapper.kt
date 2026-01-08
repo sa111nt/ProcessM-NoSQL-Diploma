@@ -1,4 +1,6 @@
-package pql
+package pql.translator
+
+import pql.model.PqlScope
 
 data class FieldPath(val segments: List<String>) {
     fun toDotPath(): String = segments.joinToString(".")
