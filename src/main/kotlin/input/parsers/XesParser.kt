@@ -24,6 +24,10 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
     // co jest w pliku, zapisać to tutaj i oddać, gdy ktoś zawoła next().
     private var nextComponent: XESComponent? = null
 
+    // POPRAWKA: Lista obsługiwanych typów atrybutów XES.
+    // Dodano 'id' zgodnie z wymaganiami dokumentacji PQL.
+    private val supportedTypes = setOf("string", "date", "int", "float", "boolean", "id")
+
     // 1. LOGIKA GŁÓWNA ITERATORA
     // Ta metoda decyduje, czy czytać dalej, czy skończyć.
     override fun hasNext(): Boolean {
@@ -83,8 +87,10 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
 
             if (reader.isStartElement) {
                 val name = reader.localName
+
+                // POPRAWKA: Używamy zbioru supportedTypes zamiast wpisywać typy ręcznie.
                 // XES definiuje typy danych jako tagi: <string key="..." value="..."/>
-                if (name in setOf("string", "date", "int", "float", "boolean")) {
+                if (name in supportedTypes) {
                     val key = reader.getAttributeValue(null, "key")
                     val value = reader.getAttributeValue(null, "value")
                     attributes[key] = castValue(name, value)
@@ -113,8 +119,9 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
             if (reader.isStartElement) {
                 val name = reader.localName
 
+                // POPRAWKA: Używamy supportedTypes.
                 // Atrybuty samego śladu (np. concept:name to zazwyczaj ID śladu)
-                if (name in setOf("string", "date", "int", "float", "boolean")) {
+                if (name in supportedTypes) {
                     val key = reader.getAttributeValue(null, "key")
                     val value = castValue(name, reader.getAttributeValue(null, "value"))
 
@@ -153,8 +160,10 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
             reader.next()
             if (reader.isStartElement) {
                 val tag = reader.localName
+
+                // POPRAWKA: Używamy supportedTypes.
                 // Wyciąganie atrybutów zdarzenia (nazwa czynności, czas, koszt itp.)
-                if (tag in setOf("string", "date", "int", "float", "boolean")) {
+                if (tag in supportedTypes) {
                     val key = reader.getAttributeValue(null, "key")
                     val value = castValue(tag, reader.getAttributeValue(null, "value"))
 
@@ -187,7 +196,8 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
     private fun castValue(tag: String, value: String?): Any? {
         if (value == null) return null
         return when (tag) {
-            "string", "date" -> value // Datę zostawiamy jako String (ISO-8601), baza sobie poradzi
+            // POPRAWKA: 'id' oraz 'date' traktujemy jako String (Baza NoSQL/JSON tak to przechowuje)
+            "string", "date", "id" -> value
             "int" -> value.toLongOrNull()
             "float" -> value.toDoubleOrNull()
             "boolean" -> value.toBooleanStrictOrNull()
