@@ -37,16 +37,18 @@ class PqlToCouchDbTranslator(
 
         val json = JsonObject().apply {
             add("selector", conditionSelector)
-            query.limit?.let { addProperty("limit", it) }
-            query.offset?.let { addProperty("skip", it) }
+            getLimitForScope(query.limits, query.scope)?.let { addProperty("limit", it) }
+            getLimitForScope(query.offsets, query.scope)?.let { addProperty("skip", it) }
         }
 
-        query.orderBy?.let { order ->
-            val sortField = fieldMapper.resolve(order.scope, order.attribute).toDotPath()
+        if (query.orderBy.isNotEmpty()) {
             val sortArray = JsonArray()
-            val sortObject = JsonObject()
-            sortObject.addProperty(sortField, order.direction.name.lowercase())
-            sortArray.add(sortObject)
+            for (order in query.orderBy) {
+                val sortField = fieldMapper.resolve(order.scope, order.attribute).toDotPath()
+                val sortObject = JsonObject()
+                sortObject.addProperty(sortField, order.direction.name.lowercase())
+                sortArray.add(sortObject)
+            }
             json.add("sort", sortArray)
         }
 
@@ -86,28 +88,39 @@ class PqlToCouchDbTranslator(
             // For GROUP BY queries, don't apply LIMIT/OFFSET at CouchDB level
             // We'll apply them after grouping in PqlInterpreter
             if (query.groupBy.isEmpty()) {
-                query.limit?.let { addProperty("limit", it) }
-                query.offset?.let { addProperty("skip", it) }
+                getLimitForScope(query.limits, query.collection)?.let { addProperty("limit", it) }
+                getLimitForScope(query.offsets, query.collection)?.let { addProperty("skip", it) }
             }
         }
 
         // ORDER BY is only applied for non-GROUP BY queries
         // For GROUP BY queries, ORDER BY is not supported
-        if (query.groupBy.isEmpty()) {
-            query.orderBy?.let { order ->
+        if (query.groupBy.isEmpty() && query.orderBy.isNotEmpty()) {
+            val sortArray = JsonArray()
+            for (order in query.orderBy) {
                 require(order.scope == query.collection) {
                     "This interpreter currently supports ordering within the ${query.collection.label} scope."
                 }
                 val sortField = fieldMapper.resolve(order.scope, order.attribute).toDotPath()
-                val sortArray = JsonArray()
                 val sortObject = JsonObject()
                 sortObject.addProperty(sortField, order.direction.name.lowercase())
                 sortArray.add(sortObject)
-                json.add("sort", sortArray)
             }
+            json.add("sort", sortArray)
         }
 
         return json
+    }
+
+    // Find the limit/offset value for a given scope.
+    // Matches scoped limits first, then falls back to unscoped.
+    private fun getLimitForScope(limits: List<ScopedLimit>, scope: PqlScope?): Int? {
+        // First try to find a limit with matching scope
+        val scoped = limits.firstOrNull { it.scope == scope }
+        if (scoped != null) return scoped.value
+        // Fall back to unscoped limit (scope = null)
+        val unscoped = limits.firstOrNull { it.scope == null }
+        return unscoped?.value
     }
     
     /**
