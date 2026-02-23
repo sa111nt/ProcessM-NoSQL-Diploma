@@ -4,16 +4,11 @@ data class PqlQuery(
     val collection: PqlScope,
     val projections: List<PqlProjection>,
     val conditions: List<PqlCondition> = emptyList(),
-    val orderBy: List<PqlOrder> = emptyList(),
-    val limits: List<ScopedLimit> = emptyList(),
-    val offsets: List<ScopedLimit> = emptyList(),
+    val orderBy: PqlOrder? = null,
+    val limit: Int? = null,
+    val offset: Int? = null,
     val groupBy: List<PqlGroupByField> = emptyList(),
     val selectAll: Boolean = false
-)
-
-data class ScopedLimit(
-    val scope: PqlScope?,  // null = unscoped (applies to collection scope)
-    val value: Int
 )
 
 data class PqlGroupByField(
@@ -155,10 +150,10 @@ enum class PqlScope(val aliases: Set<String>, val docType: String, val label: St
 
 // Represents a DELETE query
 data class PqlDeleteQuery(
-    val scope: PqlScope? = null,
+    val scope: PqlScope? = null, // Optional scope (e, t, l) - if null, deletes from all scopes
     val conditions: List<PqlCondition> = emptyList(),
-    val orderBy: List<PqlOrder> = emptyList(),
-    val limits: List<ScopedLimit> = emptyList(),
-    val offsets: List<ScopedLimit> = emptyList()
+    val orderBy: PqlOrder? = null,
+    val limit: Int? = null,
+    val offset: Int? = null
 )
 

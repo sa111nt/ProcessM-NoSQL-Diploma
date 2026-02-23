@@ -21,21 +21,17 @@ class PqlFieldMapper {
         "_id", "id" -> listOf("_id")
         "source" -> listOf("source")
         "importTimestamp" -> listOf("importTimestamp")
-        "concept:name", "name" -> listOf("log_attributes", "concept:name")
         else -> listOf("log_attributes", attribute)
     }
 
     private fun resolveTrace(attribute: String): List<String> = when (attribute) {
         "_id", "id" -> listOf("_id")
-        "logId" -> listOf("logId")
         "eventIds" -> listOf("eventIds")
-        "concept:name", "name" -> listOf("xes_attributes", "concept:name")
         else -> listOf("xes_attributes", attribute)
     }
 
     private fun resolveEvent(attribute: String): List<String> = when (attribute) {
         "_id", "id" -> listOf("_id")
-        "logId" -> listOf("logId")
         "traceId" -> listOf("traceId")
         "activity", "concept:name" -> listOf("activity")
         "timestamp", "time:timestamp" -> listOf("timestamp")

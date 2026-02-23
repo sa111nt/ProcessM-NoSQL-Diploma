@@ -12,9 +12,9 @@ class PqlQueryListener : QLParserBaseListener() {
     private var selectAll: Boolean = false
     private val projections = mutableListOf<PqlProjection>()
     private val conditions = mutableListOf<PqlCondition>()
-    private val orderByList = mutableListOf<PqlOrder>()
-    private val limitList = mutableListOf<ScopedLimit>()
-    private val offsetList = mutableListOf<ScopedLimit>()
+    private var orderBy: PqlOrder? = null
+    private var limit: Int? = null
+    private var offset: Int? = null
     private val groupByFields = mutableListOf<PqlGroupByField>()
     // Track current scope from attributes (e:, t:, l:)
     private var detectedScope: PqlScope? = null
@@ -296,7 +296,7 @@ class PqlQueryListener : QLParserBaseListener() {
                     is PqlFunction.ScalarFunction0 -> PqlScope.EVENT
                 }
                 // Store the full expression text as attribute for ORDER BY
-                orderByList.add(PqlOrder(scope, expr.text, direction))
+                orderBy = PqlOrder(scope, expr.text, direction)
                 return
             }
         }
@@ -310,7 +310,7 @@ class PqlQueryListener : QLParserBaseListener() {
         if (hasArithmetic) {
             // ORDER BY arithmetic expression - store full text
             val scope = extractScopeFromArithmetic(parseArithmeticExpression(expr) ?: return) ?: PqlScope.EVENT
-            orderByList.add(PqlOrder(scope, expr.text, direction))
+            orderBy = PqlOrder(scope, expr.text, direction)
             return
         }
 
@@ -320,40 +320,31 @@ class PqlQueryListener : QLParserBaseListener() {
             val scope = attribute.first
             val attrName = attribute.second
             detectedScope = scope
-            orderByList.add(PqlOrder(scope, attrName, direction))
+            orderBy = PqlOrder(scope, attrName, direction)
         }
     }
 
     override fun exitLimit_number(ctx: QLParser.Limit_numberContext?) {
-        val text = ctx?.NUMBER()?.text ?: return
-        val scopedLimit = parseScopedNumber(text) ?: return
-        limitList.add(scopedLimit)
+        val number = ctx?.NUMBER()?.text ?: return
+        try {
+            // LIMIT can have multiple numbers, take the first one
+            if (limit == null) {
+                limit = number.toInt()
+            }
+        } catch (e: NumberFormatException) {
+            // Ignore invalid numbers
+        }
     }
 
     override fun exitOffset_number(ctx: QLParser.Offset_numberContext?) {
-        val text = ctx?.NUMBER()?.text ?: return
-        val scopedOffset = parseScopedNumber(text) ?: return
-        offsetList.add(scopedOffset)
-    }
-    
-    private fun parseScopedNumber(text: String): ScopedLimit? {
-        // NUMBER tokens can have scope prefix like "l:3" or "e:10" or just "3"
-        val colonIndex = text.indexOf(':')
-        return if (colonIndex > 0) {
-            val scopeToken = text.substring(0, colonIndex)
-            val numberStr = text.substring(colonIndex + 1)
-            try {
-                val scope = PqlScope.fromToken(scopeToken)
-                ScopedLimit(scope, numberStr.toInt())
-            } catch (e: Exception) {
-                null
+        val number = ctx?.NUMBER()?.text ?: return
+        try {
+            // OFFSET can have multiple numbers, take the first one
+            if (offset == null) {
+                offset = number.toInt()
             }
-        } else {
-            try {
-                ScopedLimit(null, text.toInt())
-            } catch (e: NumberFormatException) {
-                null
-            }
+        } catch (e: NumberFormatException) {
+            // Ignore invalid numbers
         }
     }
 
@@ -601,9 +592,9 @@ class PqlQueryListener : QLParserBaseListener() {
             collection = finalScope,
             projections = projections,
             conditions = conditions,
-            orderBy = orderByList,
-            limits = limitList,
-            offsets = offsetList,
+            orderBy = orderBy,
+            limit = limit,
+            offset = offset,
             groupBy = groupByFields,
             selectAll = selectAll
         )
@@ -613,9 +604,9 @@ class PqlQueryListener : QLParserBaseListener() {
         return PqlDeleteQuery(
             scope = deleteScope,
             conditions = conditions,
-            orderBy = orderByList,
-            limits = limitList,
-            offsets = offsetList
+            orderBy = orderBy,
+            limit = limit,
+            offset = offset
         )
     }
 
