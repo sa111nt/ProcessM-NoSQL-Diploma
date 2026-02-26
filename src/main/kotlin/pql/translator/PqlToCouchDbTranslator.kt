@@ -41,12 +41,15 @@ class PqlToCouchDbTranslator(
             query.offset?.let { addProperty("skip", it) }
         }
 
-        query.orderBy?.let { order ->
-            val sortField = fieldMapper.resolve(order.scope, order.attribute).toDotPath()
+        // Sortowanie — dodajemy pola ORDER BY do zapytania Mango
+        if (query.orderBy.isNotEmpty()) {
             val sortArray = JsonArray()
-            val sortObject = JsonObject()
-            sortObject.addProperty(sortField, order.direction.name.lowercase())
-            sortArray.add(sortObject)
+            for (order in query.orderBy) {
+                val sortField = fieldMapper.resolve(order.scope, order.attribute).toDotPath()
+                val sortObject = JsonObject()
+                sortObject.addProperty(sortField, order.direction.name.lowercase())
+                sortArray.add(sortObject)
+            }
             json.add("sort", sortArray)
         }
 
@@ -91,18 +94,19 @@ class PqlToCouchDbTranslator(
             }
         }
 
-        // ORDER BY is only applied for non-GROUP BY queries
-        // For GROUP BY queries, ORDER BY is not supported
-        if (query.groupBy.isEmpty()) {
-            query.orderBy?.let { order ->
-                require(order.scope == query.collection) {
-                    "This interpreter currently supports ordering within the ${query.collection.label} scope."
+        // ORDER BY — tylko dla zapytań bez GROUP BY
+        if (query.groupBy.isEmpty() && query.orderBy.isNotEmpty()) {
+            val sortArray = JsonArray()
+            for (order in query.orderBy) {
+                // Na razie do Mango wysyłamy tylko pola z tego samego scope'u co kolekcja
+                if (order.scope == query.collection) {
+                    val sortField = fieldMapper.resolve(order.scope, order.attribute).toDotPath()
+                    val sortObject = JsonObject()
+                    sortObject.addProperty(sortField, order.direction.name.lowercase())
+                    sortArray.add(sortObject)
                 }
-                val sortField = fieldMapper.resolve(order.scope, order.attribute).toDotPath()
-                val sortArray = JsonArray()
-                val sortObject = JsonObject()
-                sortObject.addProperty(sortField, order.direction.name.lowercase())
-                sortArray.add(sortObject)
+            }
+            if (sortArray.size() > 0) {
                 json.add("sort", sortArray)
             }
         }
@@ -182,6 +186,12 @@ class PqlToCouchDbTranslator(
                     JsonObject().apply {
                         add("\$not", translateCondition(inner, collectionScope))
                     }
+                }
+            }
+            // AlwaysFalse — nie powinno być wywoływane, executor obsługuje to wcześniej
+            is PqlCondition.AlwaysFalse -> {
+                JsonObject().apply {
+                    add("_id", JsonObject().apply { addProperty("\$eq", "__ALWAYS_FALSE__") })
                 }
             }
         }

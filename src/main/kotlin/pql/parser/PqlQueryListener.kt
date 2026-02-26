@@ -12,7 +12,7 @@ class PqlQueryListener : QLParserBaseListener() {
     private var selectAll: Boolean = false
     private val projections = mutableListOf<PqlProjection>()
     private val conditions = mutableListOf<PqlCondition>()
-    private var orderBy: PqlOrder? = null
+    private val orderByList = mutableListOf<PqlOrder>()
     private var limit: Int? = null
     private var offset: Int? = null
     private val groupByFields = mutableListOf<PqlGroupByField>()
@@ -296,7 +296,7 @@ class PqlQueryListener : QLParserBaseListener() {
                     is PqlFunction.ScalarFunction0 -> PqlScope.EVENT
                 }
                 // Store the full expression text as attribute for ORDER BY
-                orderBy = PqlOrder(scope, expr.text, direction)
+                orderByList.add(PqlOrder(scope, expr.text, direction))
                 return
             }
         }
@@ -310,7 +310,7 @@ class PqlQueryListener : QLParserBaseListener() {
         if (hasArithmetic) {
             // ORDER BY arithmetic expression - store full text
             val scope = extractScopeFromArithmetic(parseArithmeticExpression(expr) ?: return) ?: PqlScope.EVENT
-            orderBy = PqlOrder(scope, expr.text, direction)
+            orderByList.add(PqlOrder(scope, expr.text, direction))
             return
         }
 
@@ -320,7 +320,7 @@ class PqlQueryListener : QLParserBaseListener() {
             val scope = attribute.first
             val attrName = attribute.second
             detectedScope = scope
-            orderBy = PqlOrder(scope, attrName, direction)
+            orderByList.add(PqlOrder(scope, attrName, direction))
         }
     }
 
@@ -424,7 +424,25 @@ class PqlQueryListener : QLParserBaseListener() {
             val left = arithExprs[0]
             val right = arithExprs[1]
 
-            val leftAttr = parseAttribute(left) ?: return null
+            // Sprawdź, czy oba operandy to literały (np. 0=1) — warunek zawsze fałszywy/prawdziwy
+            val leftAttr = parseAttribute(left)
+            if (leftAttr == null) {
+                // Lewa strona to literał (np. 0) — porównanie literał vs literał
+                val leftVal = extractValue(left)
+                val rightVal = extractValue(right)
+                if (leftVal != null && rightVal != null) {
+                    val isEqual = leftVal == rightVal
+                    val operator = when {
+                        ctx.OP_EQ() != null -> isEqual
+                        ctx.OP_NEQ() != null -> !isEqual
+                        else -> false
+                    }
+                    // Jeśli warunek jest fałszywy (np. 0=1), zwracamy AlwaysFalse
+                    return if (!operator) PqlCondition.AlwaysFalse else null
+                }
+                return null
+            }
+
             val rightValue = extractValue(right)
 
             val operator = when {
@@ -592,7 +610,7 @@ class PqlQueryListener : QLParserBaseListener() {
             collection = finalScope,
             projections = projections,
             conditions = conditions,
-            orderBy = orderBy,
+            orderBy = orderByList,
             limit = limit,
             offset = offset,
             groupBy = groupByFields,
@@ -604,7 +622,7 @@ class PqlQueryListener : QLParserBaseListener() {
         return PqlDeleteQuery(
             scope = deleteScope,
             conditions = conditions,
-            orderBy = orderBy,
+            orderBy = orderByList,
             limit = limit,
             offset = offset
         )

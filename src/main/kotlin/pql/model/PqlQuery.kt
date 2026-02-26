@@ -4,7 +4,7 @@ data class PqlQuery(
     val collection: PqlScope,
     val projections: List<PqlProjection>,
     val conditions: List<PqlCondition> = emptyList(),
-    val orderBy: PqlOrder? = null,
+    val orderBy: List<PqlOrder> = emptyList(),
     val limit: Int? = null,
     val offset: Int? = null,
     val groupBy: List<PqlGroupByField> = emptyList(),
@@ -104,6 +104,9 @@ sealed class PqlCondition {
     data class And(val conditions: List<PqlCondition>) : PqlCondition()
     data class Or(val conditions: List<PqlCondition>) : PqlCondition()
     data class Not(val condition: PqlCondition) : PqlCondition()
+
+    // Warunek zawsze fałszywy (np. 0=1) — natychmiast zwraca pusty wynik
+    data object AlwaysFalse : PqlCondition()
 }
 
 enum class PqlOperator {
@@ -152,7 +155,7 @@ enum class PqlScope(val aliases: Set<String>, val docType: String, val label: St
 data class PqlDeleteQuery(
     val scope: PqlScope? = null, // Optional scope (e, t, l) - if null, deletes from all scopes
     val conditions: List<PqlCondition> = emptyList(),
-    val orderBy: PqlOrder? = null,
+    val orderBy: List<PqlOrder> = emptyList(),
     val limit: Int? = null,
     val offset: Int? = null
 )

@@ -8,6 +8,7 @@ import pql.parser.AntlrPqlParser
 import pql.model.PqlDeleteQuery
 import pql.model.PqlQuery
 import pql.translator.PqlToCouchDbTranslator
+import pql.executor.PqlQueryExecutor
 
 class PqlInterpreter(
     private val dbManager: CouchDBManager,
@@ -16,6 +17,19 @@ class PqlInterpreter(
     private val parser = AntlrPqlParser()
     private val translator = PqlToCouchDbTranslator()
     private val gson = GsonBuilder().setPrettyPrinting().create()
+
+    // Executor do formatowanych zapytań PQL
+    private val executor = PqlQueryExecutor(dbManager, dbName)
+
+    /**
+     * Wykonuje zapytanie PQL i zwraca sformatowany wynik jako JsonArray.
+     * Używa PqlQueryExecutor, który formatuje wynik (tylko żądane pola).
+     * Przeznaczony do testów i programowego dostępu do wyników.
+     */
+    fun executeQuery(pql: String): JsonArray {
+        val query = parser.parse(pql) as PqlQuery
+        return executor.execute(query)
+    }
 
     fun execute(pql: String): String {
         val parsedObject = parser.parse(pql)
@@ -27,16 +41,18 @@ class PqlInterpreter(
         }
     }
 
+    // Używamy executora, który formatuje wynik (tylko żądane pola)
     private fun executeSelect(query: PqlQuery): String {
-        val mangoQuery: JsonObject = translator.translate(query)
-
-        val rawResult = dbManager.findDocs(dbName, mangoQuery)
-
         if (query.groupBy.isNotEmpty()) {
+            // GROUP BY — na razie stub, w przyszłości executor obsłuży agregacje
+            val mangoQuery: JsonObject = translator.translate(query)
+            val rawResult = dbManager.findDocs(dbName, mangoQuery)
             return processGroupBy(rawResult, query)
         }
 
-        return gson.toJson(rawResult)
+        // Standardowe zapytanie — executor formatuje wynik
+        val formattedResult = executor.execute(query)
+        return gson.toJson(formattedResult)
     }
 
     private fun executeDelete(query: PqlDeleteQuery): String {
