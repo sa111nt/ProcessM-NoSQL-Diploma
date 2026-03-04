@@ -201,9 +201,6 @@ class PqlToCouchDbTranslator(
         condition: PqlCondition.Simple,
         collectionScope: PqlScope
     ): JsonObject {
-        require(condition.scope == collectionScope) {
-            "This interpreter currently supports conditions only on the ${collectionScope.label} scope."
-        }
         
         val fieldPath = fieldMapper.resolve(condition.scope, condition.attribute)
         val conditionObject = JsonObject()

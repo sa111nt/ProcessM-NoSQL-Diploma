@@ -43,12 +43,12 @@ class PqlInterpreter(
 
     // Używamy executora, który formatuje wynik (tylko żądane pola)
     private fun executeSelect(query: PqlQuery): String {
-        if (query.groupBy.isNotEmpty()) {
-            // GROUP BY — na razie stub, w przyszłości executor obsłuży agregacje
-            val mangoQuery: JsonObject = translator.translate(query)
-            val rawResult = dbManager.findDocs(dbName, mangoQuery)
-            return processGroupBy(rawResult, query)
-        }
+//        if (query.groupBy.isNotEmpty()) {
+//            // GROUP BY — na razie stub, w przyszłości executor obsłuży agregacje
+//            val mangoQuery: JsonObject = translator.translate(query)
+//            val rawResult = dbManager.findDocs(dbName, mangoQuery)
+//            return processGroupBy(rawResult, query)
+//        }
 
         // Standardowe zapytanie — executor formatuje wynik
         val formattedResult = executor.execute(query)

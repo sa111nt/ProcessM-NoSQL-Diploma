@@ -60,6 +60,29 @@ open class CouchDBManager(
     }
 
     /**
+     * Usuwa bazę danych o podanej nazwie.
+     */
+    open fun deleteDb(dbName: String) {
+        val request = Request.Builder()
+            .delete() // Używamy metody HTTP DELETE
+            .url("$url/$dbName")
+            .header("Authorization", authHeader) // Wymagana autoryzacja
+            .build()
+
+        try {
+            client.newCall(request).execute().use { response ->
+                // Jeśli kod to 404 (Not Found), to znaczy, że bazy i tak już nie było,
+                // więc cel (brak bazy) został osiągnięty - nie rzucamy błędu.
+                if (!response.isSuccessful && response.code != 404) {
+                    throw IOException("Błąd usuwania bazy '$dbName'. Kod: ${response.code} (${response.message})")
+                }
+            }
+        } catch (e: Exception) {
+            throw IOException("Nie udało się połączyć z CouchDB ($url) podczas próby usunięcia bazy.", e)
+        }
+    }
+
+    /**
      * Wstawia dokumenty w trybie Batch.
      */
     open fun insertBulkDocsRaw(dbName: String, jsonBytes: ByteArray) {

@@ -23,42 +23,36 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
 
-    // Zależności do Mockito (Core 5.12.0 obsługuje inline, ale potrzebuje flag JVM)
+    // Zależności do Mockito
     testImplementation("org.mockito:mockito-core:5.12.0")
     testImplementation("org.mockito:mockito-junit-jupiter:5.12.0")
 }
 
-// 1. Konfiguracja ANTLR
-tasks.withType<AntlrTask> {
+// 1. Konfiguracja zadania ANTLR
+tasks.named<AntlrTask>("generateGrammarSource") {
     maxHeapSize = "64m"
-
-    // Generujemy pliki do folderu kończącego się na /ql, żeby zgadzało się z pakietem
-    outputDirectory = file("build/generated-src/antlr/main/ql")
-
-    // "-package", "ql" -> Dodaje "package ql;" do plików .java
-    // "-Xexact-output-dir" -> Wymusza zapis w outputDirectory bez tworzenia podkatalogów z pakietu
     arguments = arguments + listOf("-visitor", "-listener", "-package", "ql", "-Xexact-output-dir")
+
+    // Nowoczesny sposób definiowania katalogu wyjściowego w Gradle
+    val outputDir = layout.buildDirectory.dir("generated-src/antlr/main/ql")
+    outputDirectory = outputDir.get().asFile
 }
 
-// 2. Dodanie wygenerowanych źródeł do projektu
+// 2. Magia Gradle 8: Przekazujemy CAŁY TASK jako źródło (srcDir).
 sourceSets {
-    named("main") {
+    main {
         java {
-            srcDir("build/generated-src/antlr/main")
+            srcDir(tasks.named("generateGrammarSource"))
+        }
+    }
+    test {
+        java {
+            srcDir(tasks.named("generateTestGrammarSource"))
         }
     }
 }
 
-// 3. NAPRAWA BŁĘDU: Wymuszenie kolejności zadań
-// Kompilacja Java musi czekać na wygenerowanie gramatyki (to naprawia błąd "Gradle detected a problem...")
-tasks.withType<JavaCompile> {
-    dependsOn("generateGrammarSource")
-}
-
-// Kompilacja Kotlin też musi czekać
-tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-    dependsOn("generateGrammarSource")
-}
+// (Usunięto stare bloki 'dependsOn', bo powyższa linijka robi to lepiej i bezbłędnie)
 
 tasks.test {
     useJUnitPlatform()

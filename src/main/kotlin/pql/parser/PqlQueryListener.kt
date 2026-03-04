@@ -3,9 +3,11 @@ package pql.parser
 import pql.model.*
 import ql.QLParser
 import ql.QLParserBaseListener
+
 /**
- * Listener that processes ANTLR parse tree and builds PqlQuery.
- * This is a simplified version that handles basic queries.
+ * Listener that processes the ANTLR parse tree and builds the PqlQuery model.
+ * It traverses the tree triggered by the parser and extracts clauses,
+ * fields, functions, and scopes.
  */
 class PqlQueryListener : QLParserBaseListener() {
 
@@ -16,10 +18,11 @@ class PqlQueryListener : QLParserBaseListener() {
     private var limit: Int? = null
     private var offset: Int? = null
     private val groupByFields = mutableListOf<PqlGroupByField>()
-    // Track current scope from attributes (e:, t:, l:)
+
+    // Tracks the current active scope inferred from attributes (e.g., e:, t:, l:)
     private var detectedScope: PqlScope? = null
 
-    // DELETE query fields
+    // Fields dedicated to DELETE queries
     private var isDeleteQuery: Boolean = false
     private var deleteScope: PqlScope? = null
 
@@ -32,7 +35,7 @@ class PqlQueryListener : QLParserBaseListener() {
     }
 
     override fun enterScoped_select_all(ctx: QLParser.Scoped_select_allContext?) {
-        // Handle scoped select all (e.g., select e:*, t:*)
+        // Handle scoped select all statements (e.g., select e:*, t:*)
         val scopeToken = ctx?.SCOPE()?.text
         if (scopeToken != null) {
             val scope = PqlScope.fromToken(scopeToken)
@@ -45,7 +48,7 @@ class PqlQueryListener : QLParserBaseListener() {
         val expr = ctx?.arith_expr_root() ?: return
         val arithExpr = expr.arith_expr()
 
-        // Check if it's a function call
+        // Check if the expression is a function call
         val func = arithExpr.func()
         if (func != null) {
             val function = parseFunction(func)
@@ -71,10 +74,10 @@ class PqlQueryListener : QLParserBaseListener() {
             }
         }
 
-        // Check if it's an arithmetic expression (has operators)
+        // Check if it's an arithmetic expression (contains operators)
         val hasArithmetic = arithExpr.children?.any {
             it is org.antlr.v4.runtime.tree.TerminalNode &&
-            (it.text == "+" || it.text == "-" || it.text == "*" || it.text == "/")
+                    (it.text == "+" || it.text == "-" || it.text == "*" || it.text == "/")
         } ?: false
 
         if (hasArithmetic) {
@@ -94,7 +97,7 @@ class PqlQueryListener : QLParserBaseListener() {
             }
         }
 
-        // Regular attribute
+        // Handle regular attributes
         val attribute = parseAttribute(arithExpr)
         if (attribute != null) {
             val scope = attribute.first
@@ -111,10 +114,10 @@ class PqlQueryListener : QLParserBaseListener() {
     }
 
     private fun parseArithmeticExpression(ctx: QLParser.Arith_exprContext): PqlArithmeticExpression? {
-        // Check for binary operators (order matters: *, / before +, -)
+        // Check for binary operators (evaluate *, / before +, - to respect order of operations)
         val children = ctx.children ?: return null
 
-        // Check for multiplication or division
+        // Check for multiplication or division first
         for (i in children.indices) {
             val child = children[i]
             if (child is org.antlr.v4.runtime.tree.TerminalNode) {
@@ -146,26 +149,26 @@ class PqlQueryListener : QLParserBaseListener() {
             }
         }
 
-        // Check for parentheses
+        // Check for parentheses enclosure
         if (ctx.arith_expr().size == 1 && ctx.text.startsWith("(") && ctx.text.endsWith(")")) {
             return parseArithmeticExpression(ctx.arith_expr(0))
         }
 
-        // Check for function
+        // Check if the expression is a function
         val func = ctx.func()
         if (func != null) {
             val function = parseFunction(func) ?: return null
             return PqlArithmeticExpression.FunctionCall(function)
         }
 
-        // Check for ID (attribute)
+        // Check if the expression is an attribute ID
         val id = ctx.ID()
         if (id != null) {
             val (scope, attribute) = parseScopeAndAttribute(id.text) ?: return null
             return PqlArithmeticExpression.Attribute(scope, attribute)
         }
 
-        // Check for scalar (literal)
+        // Check if the expression is a scalar value (literal)
         val scalar = ctx.scalar()
         if (scalar != null) {
             val value = when {
@@ -203,7 +206,7 @@ class PqlQueryListener : QLParserBaseListener() {
     }
 
     private fun parseFunction(ctx: QLParser.FuncContext): PqlFunction? {
-        // Aggregation function: FUNC_AGGR '(' ID ')'
+        // Aggregation function format: FUNC_AGGR '(' ID ')'
         val funcAggr = ctx.FUNC_AGGR()
         if (funcAggr != null) {
             val id = ctx.ID()?.text ?: return null
@@ -222,7 +225,7 @@ class PqlQueryListener : QLParserBaseListener() {
             return PqlFunction.AggregationFunction(aggregationType, scope, attribute)
         }
 
-        // Scalar function with 0 arguments: FUNC_SCALAR0 '(' ')'
+        // Scalar function with 0 arguments format: FUNC_SCALAR0 '(' ')'
         val funcScalar0 = ctx.FUNC_SCALAR0()
         if (funcScalar0 != null) {
             val funcName = funcScalar0.text.lowercase()
@@ -233,7 +236,7 @@ class PqlQueryListener : QLParserBaseListener() {
             return PqlFunction.ScalarFunction0(scalarType)
         }
 
-        // Scalar function with 1 argument: FUNC_SCALAR1 '(' arith_expr ')'
+        // Scalar function with 1 argument format: FUNC_SCALAR1 '(' arith_expr ')'
         val funcScalar1 = ctx.FUNC_SCALAR1()
         if (funcScalar1 != null) {
             val arithExpr = ctx.arith_expr() ?: return null
@@ -269,10 +272,9 @@ class PqlQueryListener : QLParserBaseListener() {
         val logicExpr = ctx?.logic_expr() ?: return
         val condition = parseLogicExpr(logicExpr)
         if (condition != null) {
-            // If it's a simple condition, add it directly
-            // If it's complex (And/Or/Not), we need to handle it differently
-            // For now, we'll store it as a single condition in the list
-            // The translator will handle it properly
+            // If it's a simple condition, add it directly.
+            // Complex conditions (And/Or/Not) are currently stored as a single top-level node.
+            // The downstream translator will handle expanding them.
             conditions.add(condition)
         }
     }
@@ -284,37 +286,36 @@ class PqlQueryListener : QLParserBaseListener() {
             else -> SortDirection.ASC
         }
 
-        // Check if ORDER BY contains a function
+        // Check if ORDER BY clause contains a function
         val func = expr.func()
         if (func != null) {
             val function = parseFunction(func)
             if (function != null) {
-                // ORDER BY function (e.g., count(e:concept:name))
+                // Determine scope for function-based sorting (e.g., count(e:concept:name))
                 val scope = when (function) {
                     is PqlFunction.AggregationFunction -> function.scope ?: PqlScope.EVENT
                     is PqlFunction.ScalarFunction1 -> function.scope ?: PqlScope.EVENT
                     is PqlFunction.ScalarFunction0 -> PqlScope.EVENT
                 }
-                // Store the full expression text as attribute for ORDER BY
+                // Store the full expression text as the attribute target for sorting
                 orderByList.add(PqlOrder(scope, expr.text, direction))
                 return
             }
         }
 
-        // Check if ORDER BY contains arithmetic expression
+        // Check if ORDER BY contains an arithmetic expression
         val hasArithmetic = expr.children?.any {
             it is org.antlr.v4.runtime.tree.TerminalNode &&
-            (it.text == "+" || it.text == "-" || it.text == "*" || it.text == "/")
+                    (it.text == "+" || it.text == "-" || it.text == "*" || it.text == "/")
         } ?: false
 
         if (hasArithmetic) {
-            // ORDER BY arithmetic expression - store full text
             val scope = extractScopeFromArithmetic(parseArithmeticExpression(expr) ?: return) ?: PqlScope.EVENT
             orderByList.add(PqlOrder(scope, expr.text, direction))
             return
         }
 
-        // Regular attribute ORDER BY
+        // Handle regular attribute-based ORDER BY
         val attribute = parseAttribute(expr)
         if (attribute != null) {
             val scope = attribute.first
@@ -327,24 +328,24 @@ class PqlQueryListener : QLParserBaseListener() {
     override fun exitLimit_number(ctx: QLParser.Limit_numberContext?) {
         val number = ctx?.NUMBER()?.text ?: return
         try {
-            // LIMIT can have multiple numbers, take the first one
+            // Apply the first defined limit if multiple are present
             if (limit == null) {
                 limit = number.toInt()
             }
         } catch (e: NumberFormatException) {
-            // Ignore invalid numbers
+            // Ignore format issues
         }
     }
 
     override fun exitOffset_number(ctx: QLParser.Offset_numberContext?) {
         val number = ctx?.NUMBER()?.text ?: return
         try {
-            // OFFSET can have multiple numbers, take the first one
+            // Apply the first defined offset if multiple are present
             if (offset == null) {
                 offset = number.toInt()
             }
         } catch (e: NumberFormatException) {
-            // Ignore invalid numbers
+            // Ignore format issues
         }
     }
 
@@ -361,52 +362,67 @@ class PqlQueryListener : QLParserBaseListener() {
     }
 
     private fun parseAttribute(ctx: QLParser.Arith_exprContext): Pair<PqlScope, String>? {
-        // Simple case: just an ID (e:name, t:name, etc.)
+        // Simplified case extraction: retrieve just the ID (e.g., e:name, t:name)
         val id = ctx.ID()?.text ?: return null
-
         return parseScopeAndAttribute(id)
     }
 
     private fun parseScopeAndAttribute(id: String): Pair<PqlScope, String>? {
-        // Parse scope prefix (e:, t:, l:)
-        // Handle hoisting prefixes (^, ^^)
+        // Parse scope prefix identifiers (e:, t:, l:)
+        // Handle path-hoisting prefixes (^, ^^) for process mining variant detection
         val trimmed = id.trim()
         val hoistingPrefix = trimmed.takeWhile { it == '^' }
         val withoutHoisting = trimmed.drop(hoistingPrefix.length)
 
+        // Split the attribute by the FIRST colon occurrence
         val parts = withoutHoisting.split(":", limit = 2)
-        if (parts.size != 2) return null
 
-        val scopeToken = parts[0].lowercase()
-        val attribute = parts[1]
+        // Scenario 1: Colon is completely missing (e.g., "activity")
+        if (parts.size == 1) {
+            val scope = detectedScope ?: PqlScope.EVENT
+            // Re-attach the hoisting prefix(es) back to the attribute name
+            return Pair(scope, hoistingPrefix + withoutHoisting)
+        }
 
-        val scope = when (scopeToken) {
+        // Scenario 2: Colon exists (parts.size == 2).
+        // Verify if the left side constitutes a reserved scope prefix.
+        val possibleScopeToken = parts[0].lowercase()
+        val parsedScope = when (possibleScopeToken) {
             "e", "event", "events" -> PqlScope.EVENT
             "t", "trace", "traces" -> PqlScope.TRACE
             "l", "log", "logs" -> PqlScope.LOG
-            else -> return null
+            else -> null
         }
 
-        return Pair(scope, attribute)
+        if (parsedScope != null) {
+            // Left side is verified as a valid scope
+            // Re-attach the hoisting prefix(es) back to the attribute name
+            return Pair(parsedScope, hoistingPrefix + parts[1])
+        } else {
+            // Left side IS NOT a valid scope! Fallback to the last known detected scope.
+            // Re-attach the hoisting prefix(es) back to the attribute name
+            val scope = detectedScope ?: PqlScope.EVENT
+            return Pair(scope, hoistingPrefix + withoutHoisting)
+        }
     }
 
     /**
-     * Parse a logic_expr into a PqlCondition tree
+     * Parses a logic_expr context into a PqlCondition representation tree.
      */
     private fun parseLogicExpr(ctx: QLParser.Logic_exprContext): PqlCondition? {
-        // Handle NOT first - it has highest precedence in unary operations
+        // Evaluate NOT operator first - it has the highest precedence in unary logic
         val logicExprs = ctx.logic_expr()
         if (ctx.OP_NOT() != null && logicExprs.size == 1) {
             val inner = parseLogicExpr(logicExprs[0]) ?: return null
             return PqlCondition.Not(inner)
         }
 
-        // Handle parentheses: (logic_expr)
+        // Evaluate parenthetical precedence: (logic_expr)
         if (logicExprs.size == 1 && ctx.arith_expr().isEmpty() && ctx.OP_NOT() == null) {
             return parseLogicExpr(logicExprs[0])
         }
 
-        // Handle logical operators: AND, OR
+        // Evaluate logical boolean operators: AND, OR
         if (logicExprs.size == 2) {
             val left = parseLogicExpr(logicExprs[0]) ?: return null
             val right = parseLogicExpr(logicExprs[1]) ?: return null
@@ -418,16 +434,16 @@ class PqlQueryListener : QLParserBaseListener() {
             }
         }
 
-        // Handle comparison operators with two arith_expr
+        // Evaluate comparison operators involving two arithmetic expressions
         val arithExprs = ctx.arith_expr()
         if (arithExprs.size == 2) {
             val left = arithExprs[0]
             val right = arithExprs[1]
 
-            // Sprawdź, czy oba operandy to literały (np. 0=1) — warunek zawsze fałszywy/prawdziwy
+            // Verify if both operands are static literals (e.g., 0=1) -> representing absolute false/true
             val leftAttr = parseAttribute(left)
             if (leftAttr == null) {
-                // Lewa strona to literał (np. 0) — porównanie literał vs literał
+                // Left side is a literal value (e.g., 0) — literal vs literal comparison
                 val leftVal = extractValue(left)
                 val rightVal = extractValue(right)
                 if (leftVal != null && rightVal != null) {
@@ -437,7 +453,7 @@ class PqlQueryListener : QLParserBaseListener() {
                         ctx.OP_NEQ() != null -> !isEqual
                         else -> false
                     }
-                    // Jeśli warunek jest fałszywy (np. 0=1), zwracamy AlwaysFalse
+                    // Return AlwaysFalse if condition evaluates strictly to false (e.g., 0=1)
                     return if (!operator) PqlCondition.AlwaysFalse else null
                 }
                 return null
@@ -468,7 +484,7 @@ class PqlQueryListener : QLParserBaseListener() {
             )
         }
 
-        // Handle IN / NOT IN
+        // Evaluate IN / NOT IN collection operators
         if (arithExprs.size == 1 && ctx.in_list() != null) {
             val left = arithExprs[0]
             val leftAttr = parseAttribute(left) ?: return null
@@ -491,7 +507,7 @@ class PqlQueryListener : QLParserBaseListener() {
             )
         }
 
-        // Handle LIKE / MATCHES
+        // Evaluate LIKE / MATCHES string matching operators
         if (arithExprs.size == 1 && ctx.STRING() != null) {
             val left = arithExprs[0]
             val leftAttr = parseAttribute(left) ?: return null
@@ -514,7 +530,7 @@ class PqlQueryListener : QLParserBaseListener() {
             )
         }
 
-        // Handle IS NULL / IS NOT NULL
+        // Evaluate IS NULL / IS NOT NULL state operators
         if (arithExprs.size == 1) {
             val left = arithExprs[0]
             val leftAttr = parseAttribute(left) ?: return null
@@ -543,7 +559,7 @@ class PqlQueryListener : QLParserBaseListener() {
         val idOrScalarList = ctx.id_or_scalar_list() ?: return null
         val items = mutableListOf<String>()
 
-        // Parse ID or scalar items
+        // Extract ID or scalar items to build target validation list
         val ids = idOrScalarList.ID()
         val scalars = idOrScalarList.scalar()
 
@@ -566,8 +582,8 @@ class PqlQueryListener : QLParserBaseListener() {
     }
 
     private fun extractValue(ctx: QLParser.Arith_exprContext): String? {
-        // Extract string, number, or ID value
-        // Check scalar first
+        // Resolves string, number, or mapped ID contextual value
+        // Process scalar fallback values first
         val scalar = ctx.scalar()
         if (scalar != null) {
             return when {
@@ -579,7 +595,7 @@ class PqlQueryListener : QLParserBaseListener() {
             }
         }
 
-        // Check ID
+        // Fallback to extraction via node ID text
         return ctx.ID()?.text
     }
 
@@ -595,11 +611,11 @@ class PqlQueryListener : QLParserBaseListener() {
     }
 
     fun buildQuery(): PqlQuery {
-        // Determine collection scope from attributes
-        // Scope is determined by the prefixes in attributes (e:, t:, l:)
-        // If no scope detected, default to EVENT
+        // Resolves target collection scope relative to parsed attributes
+        // Scope resolution infers via prefix markers (e.g., e:, t:, l:)
+        // Automatically defaults to EVENT mapping if explicit declarations are missing.
 
-        // Validate that we have at least some projections or selectAll
+        // Assert query structural validity (requires either projections or SELECT *)
         if (!selectAll && projections.isEmpty()) {
             throw IllegalArgumentException("Query must have at least one projection or use SELECT *")
         }
@@ -630,4 +646,3 @@ class PqlQueryListener : QLParserBaseListener() {
 
     fun isDelete(): Boolean = isDeleteQuery
 }
-
