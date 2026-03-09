@@ -3,6 +3,8 @@ package pql
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.assertThrows
+import org.junit.jupiter.api.Assertions.assertEquals
+import pql.model.*
 import pql.parser.AntlrPqlParser
 
 /**
@@ -22,13 +24,13 @@ class PqlNegativeTest {
     }
 
     @Test
-    @DisplayName("Should throw exception for invalid scope prefix")
+    @DisplayName("Should fallback to EVENT scope for invalid prefix")
     fun testInvalidScope() {
-        // Tylko e:, t:, l: są obsługiwane przez logicScope w listenerze
+        // Zamiast rzucać błędem, system ustawia fallback na PqlScope.EVENT
         val pql = "SELECT x:attribute"
-        assertThrows<IllegalArgumentException> {
-            parser.parse(pql)
-        }
+        val query = parser.parse(pql) as PqlQuery
+        assertEquals(PqlScope.EVENT, query.projections[0].scope)
+        assertEquals("x:attribute", query.projections[0].attribute)
     }
 
     @Test

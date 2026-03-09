@@ -11,7 +11,10 @@ sealed class XESComponent
 // 2. LOG ATTRIBUTES (Nagłówek pliku)
 // Ten obiekt pojawia się w strumieniu TYLKO RAZ (zazwyczaj na początku).
 // Zawiera globalne informacje o logu (np. autor, data utworzenia, nazwa systemu).
-data class XESLogAttributes(val attributes: Map<String, Any?>) : XESComponent()
+data class XESLogAttributes(
+    val attributes: Map<String, Any?>,
+    val classifiers: Map<String, List<String>> = emptyMap()
+) : XESComponent()
 
 // 3. TRACE (Ciało pliku)
 // Ten obiekt pojawia się w strumieniu TYSIĄCE RAZY.

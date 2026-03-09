@@ -7,6 +7,7 @@ import db.CouchDBManager
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
+import org.junit.jupiter.api.Assertions.assertNotNull
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -148,6 +149,329 @@ class PqlInterpreterTest {
 
             lastTotal = currentTotal ?: lastTotal
             lastTimestamp = currentTimestamp
+        }
+    }
+
+    // Test #15-bis: orderByWithModifierAndScopes2Test
+    // Oryginalne zapytanie PQL: "where l:name='JournalReview' order by e:timestamp, t:total desc limit l:3"
+    // Nowe zapytanie PQL: "select e:concept:name, e:time:timestamp, t:cost:total order by e:time:timestamp, t:cost:total desc limit 100"
+    // Różnice: ODWRÓCONA kolejność pól w ORDER BY w stosunku do Testu #15.
+    // W PQL hierarchia scope'ów (LOG > TRACE > EVENT) determinuje priorytet sortowania,
+    // niezależnie od kolejności zapisu w zapytaniu. Wynik musi być identyczny z Testem #15.
+    @Test
+    fun orderByWithModifierAndScopes2Test() {
+        val result = interpreter.executeQuery(
+            "select e:concept:name, e:time:timestamp, t:cost:total order by e:time:timestamp, t:cost:total desc limit 100"
+        )
+
+        assertTrue(result.size() > 0, "Zapytanie powinno zwrócić dokumenty")
+
+        var lastTotal: Double? = Double.MAX_VALUE
+        var lastTimestamp = ""
+
+        // Weryfikacja identyczna z Testem #15:
+        // Sortowanie po TRACE cost malejąco (priorytet), potem EVENT timestamp rosnąco
+        for (i in 0 until result.size()) {
+            val doc = result[i].asJsonObject
+            val currentTotal = if (doc.has("t:cost:total") && !doc.get("t:cost:total").isJsonNull)
+                doc.get("t:cost:total").asDouble else null
+
+            val currentTimestamp = doc.get("e:time:timestamp")?.asString ?: ""
+
+            if (currentTotal != null && lastTotal != null) {
+                assertTrue(
+                    currentTotal <= lastTotal,
+                    "Total nie jest posortowane DESC: $currentTotal powinno być <= $lastTotal"
+                )
+
+                if (currentTotal == lastTotal && lastTimestamp.isNotEmpty() && currentTimestamp.isNotEmpty()) {
+                    assertTrue(
+                        currentTimestamp >= lastTimestamp,
+                        "Timestampy nie są posortowane ASC dla tego samego śladu: $currentTimestamp powinno być >= $lastTimestamp"
+                    )
+                }
+            }
+
+            lastTotal = currentTotal ?: lastTotal
+            lastTimestamp = currentTimestamp
+        }
+    }
+
+    // Test #16: orderByExpressionTest
+    // Oryginalne zapytanie PQL: "select min(timestamp) where l:id=$journal group by ^e:name order by min(^e:timestamp)"
+    // Nowe zapytanie PQL: "select min(e:time:timestamp) where l:id='$journalLogId' group by ^e:concept:name order by min(^e:time:timestamp)"
+    // Różnice: Test sprawdza grupowanie wariantów (hoisting ^) oraz sortowanie tych wariantów
+    // na podstawie wyników funkcji agregującej (min timestamp), a nie tylko 'count'.
+    @Test
+    fun orderByExpressionTest() {
+        val pqlQuery = """
+            select min(e:time:timestamp)
+            where l:id='$journalLogId'
+            group by ^e:concept:name
+            order by min(^e:time:timestamp)
+        """.trimIndent()
+        val result = interpreter.executeQuery(pqlQuery).asJsonArray
+
+        assertTrue(result.size() > 0, "Zapytanie powinno zwrócić warianty")
+
+        // Sprawdzenie ilości wariantów - powinno być 97 (jak w teście #19)
+        assertEquals(97, result.size(), "Powinno zwrócić dokładnie 97 unikalnych wariantów procesu")
+
+        var lastMinTimestamp = ""
+
+        // Weryfikacja: w każdym wariancie 'min(e:time:timestamp)' musi rosnąć lub pozostać równe (sortowanie ASC)
+        for (i in 0 until result.size()) {
+            val doc = result[i].asJsonObject
+            
+            // Wartość agregacji wyliczona do sortowania powinna znajdować się bezpośrednio w dokumencie grupy
+            val currentMinRaw = doc.get("min(^e:time:timestamp)")?.asString ?: ""
+            assertTrue(currentMinRaw.isNotEmpty(), "Brak wyliczonej wartości min(^e:time:timestamp) dla sortowania")
+
+            if (lastMinTimestamp.isNotEmpty() && currentMinRaw.isNotEmpty()) {
+                // Konwersja na liczby do bezpiecznego porównania w przypadku epoch/double
+                val currentMinVal = currentMinRaw.toDoubleOrNull()
+                val lastMinVal = lastMinTimestamp.toDoubleOrNull()
+                
+                if (currentMinVal != null && lastMinVal != null) {
+                    assertTrue(currentMinVal >= lastMinVal, "Warianty nie są posortowane po min(^e:time:timestamp) ASC: $currentMinVal powinno być >= $lastMinVal")
+                } else {
+                    assertTrue(currentMinRaw >= lastMinTimestamp, "Warianty nie są posortowane po min(^e:time:timestamp) ASC: $currentMinRaw powinno być >= $lastMinTimestamp")
+                }
+            }
+            lastMinTimestamp = currentMinRaw
+        }
+    }
+
+    // Test #9: groupByOuterScopeTest
+    // Oryginalne zapytanie PQL: "select t:min(l:name) where l:id=$journal limit l:3"
+    // Nowe zapytanie PQL: "select t:min(l:concept:name) where l:id='$journalLogId'"
+    // Różnice: Test sprawdza "cross-scope aggregation" dla zewnętrznego scope'u (OUTER SCOPE).
+    // Będąc w kontekście TRACE, zapytanie wylicza min() po atrybucie LOG.
+    // Aby to zadziałało, PqlQueryExecutor umie odczytać atrybut logu (logDocsMap).
+    @Test
+    fun groupByOuterScopeTest() {
+        val pqlQuery = """
+            select t:min(l:concept:name)
+            where l:id='$journalLogId'
+        """.trimIndent()
+        val result = interpreter.executeQuery(pqlQuery).asJsonArray
+
+        assertTrue(result.size() > 0, "Zapytanie powinno zwrócić dane per-trace z zewnętrzną agregacją")
+
+        // Sprawdzenie: każdy ślad powinien mieć wyliczone pole t:min(l:concept:name) równe nazwie logu
+        for (i in 0 until result.size()) {
+            val doc = result[i].asJsonObject
+            val eventDoc = doc.getAsJsonArray("events")[0].asJsonObject
+            val minLogName = eventDoc.get("t:min(l:concept:name)")?.asString
+            assertEquals("JournalReview", minLogName, "Cross-scope aggregation z LOG nie powiodło się dla trace ${i}")
+        }
+    }
+
+    // Test #7: groupLogByEventStandardAttributeAndImplicitGroupEventByTest
+    // Oryginalne zapytanie PQL: "select sum(e:total) where l:name='JournalReview' group by ^^e:name"
+    // Nowe zapytanie PQL: "select sum(e:cost:total) where l:id='$journalLogId' group by ^^e:concept:name"
+    // Różnice: Symbol `^^` oznacza "hoisting na poziom logu" (global aggregation across all traces).
+    // Zapytanie grupuje wszystkie zdarzenia o danej nazwie z CAŁEGO LOGU (a nie per-trace jak `e:name`).
+    @Test
+    fun groupLogByEventStandardAttributeAndImplicitGroupEventByTest() {
+        val pqlQuery = """
+            select sum(e:cost:total)
+            where l:id='$journalLogId'
+            group by ^^e:concept:name
+        """.trimIndent()
+        val result = interpreter.executeQuery(pqlQuery).asJsonArray
+
+        // Oczekujemy zgrupowania globalnego. Ilość grup odpowiada liczbie UNIKALNYCH nazw zdarzeń w całym logu.
+        assertTrue(result.size() > 1, "Powinno zwrócić więcej niż 1 grupę (tyle ile unikalnych nazw activity w całym logu)")
+
+        // Sprawdzamy, czy w każdej grupie mamy obliczoną sumę dla wszystkich zassanych zdarzeń wewnątrz
+        for (i in 0 until result.size()) {
+            val groupDoc = result[i].asJsonObject
+            val groupCount = groupDoc.get("count").asInt
+            assertTrue(groupCount >= 1, "Każda grupa powinna mieć co najmniej jedno zdarzenie")
+
+            val eventDoc = groupDoc.getAsJsonArray("events")[0].asJsonObject
+            val sumTotalElement = eventDoc.get("sum(e:cost:total)")
+            assertNotNull(sumTotalElement, "Pole sum(e:cost:total) powinno być obecne")
+            
+            val sumTotal = sumTotalElement.asDouble
+            // Zgodnie z testem O.K. wartości kosztu dla tych zdarzeń zachowują pewien zakres
+            assertTrue(sumTotal in (1.0 * groupCount)..(1.08 * groupCount + 1e-6), 
+                "Suma kosztów e:cost:total ($sumTotal) nie mieści się w oczekiwanym zakresie bazującym na zliczonych zdarzeniach ($groupCount)")
+        }
+    }
+
+    // Test #10: groupLogByEventStandardAndGroupEventByStandardAttributeAttributeTest
+    // Oryginalne zapytanie PQL: "select e:name, sum(e:total) where l:name='JournalReview' group by ^^e:name, e:name"
+    // Nowe zapytanie PQL: "select e:concept:name, sum(e:cost:total) where l:id='$journalLogId' group by ^^e:concept:name, e:concept:name"
+    // Różnice: Symbol `^^` oznacza "hoisting na poziom logu" (global aggregation across all traces), a dodanie drugiego parametru 
+    // `e:concept:name` wskazuje na zagnieżdżenie, z jakiego wywodzą się eventy. W spłaszczonym systemie grupowania zadziała to identycznie 
+    // jak w Teście 7, tak jak oczekuje tego projekt, ze względu na połączenie (flattening) kluczy grupujących i wyłączenie auto-identyfikatora `traceId`.
+    @Test
+    fun groupLogByEventStandardAndGroupEventByStandardAttributeAttributeTest() {
+        val pqlQuery = """
+            select e:concept:name, sum(e:cost:total)
+            where l:id='$journalLogId'
+            group by ^^e:concept:name, e:concept:name
+        """.trimIndent()
+        val result = interpreter.executeQuery(pqlQuery).asJsonArray
+
+        // Oczekujemy zgrupowania globalnego. Ilość grup odpowiada liczbie UNIKALNYCH nazw zdarzeń w całym logu.
+        assertTrue(result.size() > 1, "Powinno zwrócić więcej niż 1 grupę (tyle ile unikalnych nazw activity w całym logu)")
+
+        // Sprawdzamy, czy w każdej grupie mamy obliczoną sumę dla wszystkich zassanych zdarzeń wewnątrz
+        for (i in 0 until result.size()) {
+            val groupDoc = result[i].asJsonObject
+            val groupCount = groupDoc.get("count").asInt
+            assertTrue(groupCount >= 1, "Każda grupa powinna mieć co najmniej jedno zdarzenie")
+
+            val eventDoc = groupDoc.getAsJsonArray("events")[0].asJsonObject
+            val sumTotalElement = eventDoc.get("sum(e:cost:total)")
+            assertNotNull(sumTotalElement, "Pole sum(e:cost:total) powinno być obecne")
+            
+            val sumTotal = sumTotalElement.asDouble
+            // Zgodnie z testem O.K. wartości kosztu dla tych zdarzeń zachowują pewien zakres
+            assertTrue(sumTotal in (1.0 * groupCount)..(1.08 * groupCount + 1e-6), 
+                "Suma kosztów e:cost:total ($sumTotal) nie mieści się w oczekiwanym zakresie bazującym na zliczonych zdarzeniach ($groupCount)")
+        }
+    }
+
+    // Test #11: groupByImplicitFromSelectTest
+    // Oryginalne zapytanie PQL: "select l:*, t:*, avg(e:total), min(e:timestamp), max(e:timestamp) where l:name matches '(?i)^journalreview$' limit l:1"
+    // Nowe zapytanie PQL: "select l:*, t:*, avg(e:cost:total), min(e:time:timestamp), max(e:time:timestamp) where l:id='$journalLogId'"
+    // Różnice: Sprawdzamy, czy funkcje agregujące w SELECT bez podanego GROUP BY wygenerują implicit group by scope per-trace.
+    @Test
+    fun groupByImplicitFromSelectTest() {
+        val pqlQuery = """
+            select l:*, t:*, avg(e:cost:total), min(e:time:timestamp), max(e:time:timestamp)
+            where l:id='$journalLogId'
+        """.trimIndent()
+        val result = interpreter.executeQuery(pqlQuery).asJsonArray
+
+        // Log ma 101 trace'ów - z powodu braku limitu
+        assertEquals(101, result.size(), "Domyślne grupowanie na poziomie trace powinno zwrócić 101 grup (jedna na trace)")
+
+        // Sprawdzamy pierwszy wariant/ślad
+        val traceDoc = result[0].asJsonObject
+        
+        // Posiada metadane reprezentanta
+        val count = traceDoc.get("count")?.asInt
+        assertNotNull(count, "Każda grupa musi mieć zliczoną liczbę zdarzeń")
+        assertTrue(count!! >= 1, "Powinno być co najmniej 1 zdarzenie w trace")
+
+        // Sprawdzamy wyliczone funkcje wewnątrz reprezentanta
+        val eventDoc = traceDoc.getAsJsonArray("events")[0].asJsonObject
+        
+        val avgTotal = eventDoc.get("avg(e:cost:total)")
+        assertNotNull(avgTotal, "Pole avg(e:cost:total) powinno być obecne")
+        assertTrue(avgTotal.asDouble in 1.0..1.08, "Wartość avg(e:cost:total) musi mieścić się w odpowiednim zakresie (1.0..1.08)")
+
+        val minTimestamp = eventDoc.get("min(e:time:timestamp)")
+        assertNotNull(minTimestamp, "Pole min(e:time:timestamp) powinno być obecne")
+        
+        val maxTimestamp = eventDoc.get("max(e:time:timestamp)")
+        assertNotNull(maxTimestamp, "Pole max(e:time:timestamp) powinno być obecne")
+    }
+
+    // Test #12: groupByImplicitFromOrderByTest
+    // Oryginalne zapytanie PQL: "where l:id=$journal order by avg(e:total), min(e:timestamp), max(e:timestamp)"
+    // Nowe zapytanie PQL: "where l:id='$journalLogId' order by avg(e:cost:total), min(e:time:timestamp), max(e:time:timestamp)"
+    // Różnice: Taki sam test jak #11, lecz używa ORDER BY zamiast bloku SELECT do aktywacji wymuszenia na Implicit Grouping per-trace.
+    @Test
+    fun groupByImplicitFromOrderByTest() {
+        val pqlQuery = """
+            where l:id='$journalLogId'
+            order by avg(e:cost:total), min(e:time:timestamp), max(e:time:timestamp)
+        """.trimIndent()
+        
+        val result = interpreter.executeQuery(pqlQuery).asJsonArray
+
+        // Log ma 101 trace'ów - grupowanie wyrzuca 101 obciętych wyników (jako jeden trace z per-trace grouping constraint)
+        assertEquals(101, result.size(), "Domyślne grupowanie na poziomie trace aktywowane przez obliczenia w ORDER BY powinno zwrócić 101 grup")
+
+        // Sprawdzamy pierwszy trace pod kątem prawidłowej alokacji
+        val traceDoc = result[0].asJsonObject
+        
+        val count = traceDoc.get("count")?.asInt
+        assertNotNull(count, "Każda z grup musi zawierać metadata property 'count' definiującą event size")
+        assertTrue(count!! >= 1, "Trace property size nie może być pusty")
+
+        val eventDoc = traceDoc.getAsJsonArray("events")[0].asJsonObject
+        
+        val avgTotal = eventDoc.get("avg(e:cost:total)")
+        assertNotNull(avgTotal, "Pole avg(e:cost:total) wyciągnięte z ORDER BY nie widnieje na liście properties złączonego dokumentu")
+        assertTrue(avgTotal.asDouble in 1.0..1.08, "Średnia zdarzeń na dany ślad nie mieści się w standardowym okienku 1.0-1.08 dla Journala")
+        
+        assertNotNull(eventDoc.get("min(e:time:timestamp)"), "Brak klucza wymuszającego sort timestampa najniższego")
+        assertNotNull(eventDoc.get("max(e:time:timestamp)"), "Brak klucza wymuszającego sort timestampa najwyższego")
+    }
+
+    // Test #6: groupEventByStandardAttributeTest
+    // Oryginalne zapytanie PQL: "select t:name, e:name, sum(e:total) where l:id=$journal group by e:name"
+    // Nowe zapytanie PQL: "select t:concept:name, e:concept:name, sum(e:cost:total) where l:id='$journalLogId' group by e:concept:name"
+    // Różnice: GROUP BY e:name w hierarchicznym modelu profesora grupuje eventy WEWNĄTRZ każdego trace (inner scope).
+    // W naszym płaskim modelu CouchDB, aby uzyskać ten sam efekt, dodajemy traceId do klucza grupy
+    // automatycznie w PqlQueryExecutor. Weryfikujemy unikalność nazw eventów w ramach każdego trace
+    // oraz poprawność obliczenia SUM(cost:total).
+    @Test
+    fun groupEventByStandardAttributeTest() {
+        val pqlQuery = """
+            select t:concept:name, e:concept:name, sum(e:cost:total)
+            where l:id='$journalLogId'
+            group by e:concept:name
+        """.trimIndent()
+        val result = interpreter.executeQuery(pqlQuery).asJsonArray
+
+        assertTrue(result.size() > 0, "Zapytanie powinno zwrócić pogrupowane wyniki")
+
+        // Pogrupowanie wyników po trace aby zweryfikować strukturę per-trace
+        val groupsByTrace = mutableMapOf<String, MutableList<JsonObject>>()
+        for (i in 0 until result.size()) {
+            val group = result[i].asJsonObject
+            val events = group.getAsJsonArray("events")
+            val rep = events[0].asJsonObject
+            val traceName = rep.get("t:concept:name")?.asString ?: "unknown"
+            groupsByTrace.getOrPut(traceName) { mutableListOf() }.add(group)
+        }
+
+        // Powinno być 101 unikatowych trace'ów
+        assertEquals(101, groupsByTrace.size, "Powinno być dokładnie 101 trace'ów")
+
+        val eventNames = setOf(
+            "invite reviewers", "time-out 1", "time-out 2", "time-out 3",
+            "get review 1", "get review 2", "get review 3",
+            "collect reviews", "decide",
+            "invite additional reviewer", "get review X", "time-out X",
+            "reject", "accept"
+        )
+
+        for ((traceName, groupsInTrace) in groupsByTrace) {
+            // Weryfikacja: w ramach każdego trace nazwy eventów muszą być unikalne (GROUP BY zadziałał)
+            val namesInTrace = groupsInTrace.mapNotNull {
+                it.getAsJsonArray("events")?.get(0)?.asJsonObject
+                    ?.get("e:concept:name")?.asString
+            }
+            val uniqueNames = namesInTrace.toSet()
+            assertEquals(uniqueNames.size, namesInTrace.size,
+                "Znaleziono duplikaty nazw eventów w trace '$traceName' — GROUP BY nie zadziałał!")
+
+            // Każda nazwa eventu musi należeć do zbioru dozwolonych
+            for (name in namesInTrace) {
+                assertTrue(name in eventNames,
+                    "Nieznana nazwa eventu: '$name' w trace '$traceName'")
+            }
+
+            // Weryfikacja SUM(e:cost:total) >= 1.0 dla każdej grupy
+            for (group in groupsInTrace) {
+                val count = group.get("count")?.asInt ?: 0
+                assertTrue(count >= 1, "Każda grupa powinna mieć count >= 1")
+
+                val rep = group.getAsJsonArray("events")[0].asJsonObject
+                val sumRaw = rep.get("sum(e:cost:total)")?.asString
+                val sumValue = sumRaw?.toDoubleOrNull()
+                assertTrue(sumValue != null && sumValue >= 1.0,
+                    "sum(e:cost:total) powinno być >= 1.0, otrzymano: $sumValue w trace '$traceName'")
+            }
         }
     }
 

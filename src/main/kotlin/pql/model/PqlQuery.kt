@@ -128,7 +128,9 @@ enum class PqlOperator {
 data class PqlOrder(
     val scope: PqlScope,
     val attribute: String,
-    val direction: SortDirection
+    val direction: SortDirection,
+    val function: PqlFunction? = null,
+    val arithmeticExpression: PqlArithmeticExpression? = null
 )
 
 enum class SortDirection {
