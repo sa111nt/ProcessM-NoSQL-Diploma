@@ -21,9 +21,8 @@ import java.util.concurrent.TimeUnit
 class StreamingXesToCouchDBMapper(
     private val couchDB: CouchDBManager,
     private val databaseName: String,
-    // Wielkość paczki. 1000 to balans między narzutem HTTP a zużyciem RAM.
-    private val batchSize: Int = 1000,
-    // Liczba wątków. Ustawiamy 6-8, aby nasycić rdzenie procesora podczas generowania JSON.
+    // Zmniejszono z 1000 na 100, aby zapobiec odrzucaniu zbyt dużych paczek przez CouchDB (Payload Too Large)
+    private val batchSize: Int = 100,
     private val parallelism: Int = 6
 ) {
 
@@ -198,9 +197,26 @@ class StreamingXesToCouchDBMapper(
 
     private fun writeAttributes(writer: JsonWriter, attributes: Map<String, Any?>) {
         writer.beginObject()
-        attributes.forEach { (k, v) ->
-            // Konwertujemy wszystko na String dla bezpieczeństwa JSON
-            writer.name(k).value(v?.toString())
+        for ((k, v) in attributes) {
+            try {
+                // Obchodzimy system typów Kotlina. Wymuszamy potraktowanie klucza jako
+                // mogącego być nullem, bo parser Javy wstrzykuje tu brudne dane.
+                val nullableKey: String? = k as String?
+
+//                // Dodajemy DEBUG, żebyśmy na własne oczy zobaczyli, jaki atrybut psuje import
+//                if (nullableKey == null || nullableKey.isBlank()) {
+//                    println("[DEBUG] Znaleziono uszkodzony atrybut w pliku XES! Klucz: '$nullableKey', Wartość: '$v'")
+//                }
+
+                val safeKey = if (!nullableKey.isNullOrBlank()) nullableKey else "unknown_attribute_key"
+
+                // Konwertujemy wszystko na String dla bezpieczeństwa JSON
+                writer.name(safeKey).value(v?.toString())
+
+            } catch (e: Exception) {
+                println("[ERROR] Błąd podczas mapowania atrybutu! Klucz wejściowy: $k, Wartość: $v")
+                throw e
+            }
         }
         writer.endObject()
     }

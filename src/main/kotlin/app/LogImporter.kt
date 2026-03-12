@@ -89,7 +89,7 @@ object LogImporter {
         val parser = StaxXesParser(xmlReader)
 
         // Używamy przekazanej nazwy bazy (dbName) zamiast sztywnego "event_logs"
-        val mapper = StreamingXesToCouchDBMapper(couch, dbName, batchSize = 1000, parallelism = 6)
+        val mapper = StreamingXesToCouchDBMapper(couch, dbName, batchSize = 100, parallelism = 6)
 
         mapper.map(parser)
     }

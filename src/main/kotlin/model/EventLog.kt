@@ -4,7 +4,7 @@ package model
  * Reprezentuje cały dziennik zdarzeń.
  * Jest najwyższym poziomem modelu danych (scope: log).
  */
-data class EventLog(
+data class Log(
     val events: List<Event> = emptyList(),
 
     val traces: List<Trace> = emptyList(),

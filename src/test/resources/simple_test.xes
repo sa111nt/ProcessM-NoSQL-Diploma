@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<log xes.version="1.0" xmlns="http://www.xes-standard.org/">
+    <extension name="Organizational" prefix="org" uri="http://www.xes-standard.org/org.xesext"/>
+    <extension name="Concept" prefix="concept" uri="http://www.xes-standard.org/concept.xesext"/>
+    <extension name="Time" prefix="time" uri="http://www.xes-standard.org/time.xesext"/>
+
+    <string key="concept:name" value="Simple Test Log"/>
+
+    <trace>
+        <string key="concept:name" value="Trace_1"/>
+        <event>
+            <string key="concept:name" value="Start"/>
+            <string key="org:resource" value="Mike"/>
+            <date key="time:timestamp" value="2026-01-01T10:00:00.000+01:00"/>
+        </event>
+        <event>
+            <string key="concept:name" value="Middle"/>
+            <string key="org:resource" value="Pete"/>
+            <date key="time:timestamp" value="2026-01-01T11:00:00.000+01:00"/>
+        </event>
+    </trace>
+
+    <trace>
+        <string key="concept:name" value="Trace_2"/>
+        <event>
+            <string key="concept:name" value="Start"/>
+            <string key="org:resource" value="Mike"/>
+            <date key="time:timestamp" value="2026-01-02T10:00:00.000+01:00"/>
+        </event>
+        <event>
+            <string key="concept:name" value="End"/>
+            <string key="org:resource" value="Anne"/>
+            <date key="time:timestamp" value="2026-01-02T12:00:00.000+01:00"/>
+        </event>
+    </trace>
+</log>
