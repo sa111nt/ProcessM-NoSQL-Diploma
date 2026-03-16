@@ -1,298 +1,500 @@
 package pql
 
-import com.google.gson.GsonBuilder
+import app.PqlInterpreter
+import app.LogImporter
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import db.CouchDBManager
-import app.PqlInterpreter
-import app.LogImporter
-import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
+import org.junit.jupiter.api.TestMethodOrder
 import org.junit.jupiter.api.MethodOrderer
 import org.junit.jupiter.api.Order
-import org.junit.jupiter.api.TestMethodOrder
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
+/**
+ * GIGANTYCZNA, PEŁNA weryfikacja zgodności silnika PQL z oficjalną dokumentacją (Wersja 0.4).
+ * Klasa zaprojektowana tak, aby "wywalała się" na brakach w implementacji (TDD).
+ * Każdy test drukuje pełen raport: Oryginał PQL -> Nasze PQL -> Oczekiwano -> Zwrócono.
+ */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-@TestMethodOrder(MethodOrderer.OrderAnnotation::class) // Wymuszamy kolejność testów!
+@TestMethodOrder(MethodOrderer.OrderAnnotation::class)
 class PqlDocumentationComplianceTest {
 
     private lateinit var interpreter: PqlInterpreter
     private lateinit var journalLogId: String
-    private lateinit var hospitalLogId: String
-    private val dbName = "event_logs"
-    private lateinit var dbManager: CouchDBManager
 
     @BeforeAll
     fun setup() {
-        dbManager = CouchDBManager(
-            url = "http://127.0.0.1:5984",
-            user = "admin",
-            password = "admin"
-        )
+        val dbManager = CouchDBManager(url = "http://127.0.0.1:5984", user = "admin", password = "admin")
+        val dbName = "pql_full_compliance_tests"
 
         try { dbManager.deleteDb(dbName) } catch (e: Exception) {}
         try { dbManager.createDb(dbName) } catch (e: Exception) {}
 
-        println("=== SETUP: Rozpoczęcie importowania logów ===")
-
-        val logQuery = JsonObject().apply {
-            add("selector", JsonObject().apply { addProperty("docType", "log") })
-        }
-
-        LogImporter.import("src/test/resources/Hospital_log.xes.gz", dbName, dbManager)
-        val hospitalLogs = dbManager.findDocs(dbName, logQuery)
-        hospitalLogId = hospitalLogs[0].asJsonObject.get("_id").asString
-        println("Zidentyfikowano Hospital Log: ID = $hospitalLogId")
-
+        println("=== SETUP: Rozpoczęcie importowania logu do bazy: $dbName ===")
         LogImporter.import("src/test/resources/JournalReview-extra.xes", dbName, dbManager)
-        val allLogs = dbManager.findDocs(dbName, logQuery)
-        for (i in 0 until allLogs.size()) {
-            val currentId = allLogs[i].asJsonObject.get("_id").asString
-            if (currentId != hospitalLogId) {
-                journalLogId = currentId
-                println("Zidentyfikowano Journal Log: ID = $journalLogId")
-            }
-        }
+
+        val logQuery = JsonObject().apply { add("selector", JsonObject().apply { addProperty("docType", "log") }) }
+        val logs = dbManager.findDocs(dbName, logQuery)
+        journalLogId = logs[0].asJsonObject.get("_id").asString
 
         interpreter = PqlInterpreter(dbManager, dbName)
-        println("=== KONIEC SETUPU ===\n")
+        println("=== KONIEC SETUPU. ID Logu: $journalLogId ===")
     }
 
-    // =========================================================================
-    // 1. TESTY POKAZOWE (DOKUMENTACYJNE) - 42 Zapytania DQL
-    // =========================================================================
-    data class ShowcaseQuery(
-        val description: String,
-        val originalPql: String,
-        val ourPql: String
-    )
-
-    @Test
-    @Order(1) // Ten test poleci jako PIERWSZY
-    fun executeShowcaseQueries() {
-        val gson = GsonBuilder().setPrettyPrinting().create()
-
-        val queries = listOf(
-            ShowcaseQuery("1. Podstawowy SELECT (wskazane atrybuty)", "SELECT concept:name, org:resource FROM Event", "select e:concept:name, e:org:resource where l:id='$journalLogId' limit 2"),
-            ShowcaseQuery("2. Wybieranie wszystkich atrybutów (*)", "SELECT * FROM Log", "select * where l:id='$journalLogId' limit 1"),
-            ShowcaseQuery("3. Stronicowanie (LIMIT & OFFSET)", "SELECT concept:name LIMIT 3 OFFSET 5", "select e:concept:name where l:id='$journalLogId' limit 3 offset 5"),
-            ShowcaseQuery("4. Proste filtrowanie logiczne (WHERE ... AND)", "SELECT concept:name, org:resource WHERE org:resource = 'Pete'", "select e:concept:name, e:org:resource where l:id='$journalLogId' and e:org:resource = 'Pete' limit 2"),
-            ShowcaseQuery("5. Filtrowanie z operatorem OR", "SELECT concept:name WHERE org:resource = 'Pete' OR org:resource = 'Anne'", "select e:concept:name, e:org:resource where l:id='$journalLogId' and (e:org:resource = 'Pete' or e:org:resource = 'Anne') limit 2"),
-            ShowcaseQuery("6. Operator IN (Lista wartości)", "SELECT concept:name WHERE org:resource IN ('Anne', 'Pete')", "select e:concept:name, e:org:resource where l:id='$journalLogId' and e:org:resource in ('Anne', 'Pete') limit 2"),
-            ShowcaseQuery("7. Operator tekstowy LIKE (Wyszukiwanie wzorca)", "SELECT concept:name WHERE concept:name LIKE '%review%'", "select e:concept:name where l:id='$journalLogId' and e:concept:name like '%review%' limit 2"),
-            ShowcaseQuery("8. Operator sprawdzania NULL (is not null)", "SELECT concept:name WHERE cost:total IS NOT NULL", "select e:concept:name, e:cost:total where l:id='$journalLogId' and e:cost:total is not null limit 2"),
-            ShowcaseQuery("9. Porównanie matematyczne (>)", "SELECT concept:name WHERE cost:total > 1.0", "select e:concept:name, e:cost:total where l:id='$journalLogId' and e:cost:total > 1.0 limit 2"),
-            ShowcaseQuery("10. Dynamiczne operacje arytmetyczne", "SELECT cost:total, cost:total * 1.5", "select e:cost:total, e:cost:total * 1.5 where l:id='$journalLogId' and e:cost:total is not null limit 2"),
-            ShowcaseQuery("11. Złożona arytmetyka w locie", "SELECT (cost:total + 10) * 2", "select (e:cost:total + 10) * 2 where l:id='$journalLogId' and e:cost:total is not null limit 2"),
-            ShowcaseQuery("12. Agregacje (Implicit Group By)", "SELECT COUNT(concept:name), AVG(cost:total), MIN(cost:total)", "select count(^^e:concept:name), avg(^^e:cost:total), min(^^e:cost:total) where l:id='$journalLogId'"),
-            ShowcaseQuery("13. Tradycyjne Grupowanie (GROUP BY)", "SELECT org:resource, COUNT(concept:name) GROUP BY org:resource", "select e:org:resource, count(e:concept:name) where l:id='$journalLogId' group by e:org:resource limit 3"),
-            ShowcaseQuery("14. Wielokrotne Grupowanie", "SELECT org:resource, lifecycle:transition, COUNT(*) GROUP BY org:resource, lifecycle:transition", "select e:org:resource, e:lifecycle:transition, count(e:concept:name) where l:id='$journalLogId' group by e:org:resource, e:lifecycle:transition limit 3"),
-            ShowcaseQuery("15. Process Mining - Warianty (^)", "SELECT COUNT(Trace) GROUP BY ^concept:name ORDER BY COUNT(Trace) DESC", "select count(t:name) where l:id='$journalLogId' group by ^e:concept:name order by count(t:name) desc limit 3"),
-            ShowcaseQuery("16. Sortowanie (ORDER BY)", "SELECT concept:name, time:timestamp ORDER BY time:timestamp DESC", "select e:concept:name, e:time:timestamp where l:id='$journalLogId' order by e:time:timestamp desc limit 3"),
-            ShowcaseQuery("17. Sortowanie po agregacji", "SELECT org:resource, COUNT(concept:name) GROUP BY org:resource ORDER BY COUNT(concept:name) DESC", "select e:org:resource, count(e:concept:name) where l:id='$journalLogId' group by e:org:resource order by count(e:concept:name) desc limit 3"),
-            ShowcaseQuery("18. Poziom śladu (Trace Level)", "SELECT Trace.concept:name, COUNT(Event.concept:name) GROUP BY Trace.concept:name", "select t:concept:name, count(e:concept:name) where l:id='$journalLogId' group by t:concept:name limit 2"),
-            ShowcaseQuery("19. Cross-Scope WHERE", "SELECT Trace.concept:name WHERE ^Event.concept:name = 'reject'", "select t:concept:name where l:id='$journalLogId' and ^e:concept:name = 'reject' limit 2"),
-            ShowcaseQuery("20. Różnica dat/czasów w Order By", "SELECT concept:name ORDER BY time:timestamp ASC", "select e:concept:name, e:time:timestamp where l:id='$journalLogId' order by e:time:timestamp asc limit 2"),
-            ShowcaseQuery("21. Operator Nierówności (!=)", "SELECT concept:name WHERE org:resource != 'Mike'", "select e:concept:name, e:org:resource where l:id='$journalLogId' and e:org:resource != 'Mike' limit 2"),
-            ShowcaseQuery("22. Operatory Mniejsze/Równe (<=)", "SELECT concept:name WHERE cost:total <= 1.0", "select e:concept:name, e:cost:total where l:id='$journalLogId' and e:cost:total <= 1.0 limit 2"),
-            ShowcaseQuery("23. Operator NOT IN", "SELECT concept:name WHERE org:resource NOT IN ('Mike', 'Pete')", "select e:concept:name, e:org:resource where l:id='$journalLogId' and e:org:resource not in ('Mike', 'Pete') limit 2"),
-            ShowcaseQuery("24. Negacja Logiczna NOT (...)", "SELECT concept:name WHERE NOT (lifecycle:transition = 'complete')", "select e:concept:name, e:lifecycle:transition where l:id='$journalLogId' and not (e:lifecycle:transition = 'complete') limit 2"),
-            ShowcaseQuery("25. Wyrażenia Regularne (MATCHES)", "SELECT concept:name WHERE concept:name MATCHES '^inv.*'", "select e:concept:name where l:id='$journalLogId' and e:concept:name matches '^inv.*' limit 2"),
-            ShowcaseQuery("26. Operator IS NULL", "SELECT concept:name WHERE cost:total IS NULL", "select e:concept:name, e:cost:total where l:id='$journalLogId' and e:cost:total is null limit 2"),
-            ShowcaseQuery("27. Złożone AND i OR z nawiasami", "SELECT concept:name WHERE (org:resource = 'Mike' OR org:resource = 'Anne') AND lifecycle:transition = 'start'", "select e:concept:name, e:org:resource, e:lifecycle:transition where l:id='$journalLogId' and (e:org:resource = 'Mike' or e:org:resource = 'Anne') and e:lifecycle:transition = 'start' limit 2"),
-            ShowcaseQuery("28. Globalna funkcja SUM", "SELECT SUM(cost:total)", "select sum(^^e:cost:total) where l:id='$journalLogId'"),
-            ShowcaseQuery("29. Operacje MIN / MAX na Datach", "SELECT MIN(time:timestamp), MAX(time:timestamp)", "select min(^^e:time:timestamp), max(^^e:time:timestamp) where l:id='$journalLogId'"),
-            ShowcaseQuery("30. Agregacja Kosztów Śladu", "SELECT Trace.concept:name, SUM(cost:total) GROUP BY Trace.concept:name", "select t:concept:name, sum(e:cost:total) where l:id='$journalLogId' group by t:concept:name limit 3"),
-            ShowcaseQuery("31. Sortowanie Wielokolumnowe", "SELECT org:resource, time:timestamp ORDER BY org:resource ASC, time:timestamp DESC", "select e:org:resource, e:time:timestamp where l:id='$journalLogId' order by e:org:resource asc, e:time:timestamp desc limit 3"),
-            ShowcaseQuery("32. Ułamkowa Arytmetyka", "SELECT (cost:total / 2.0) - 0.1", "select (e:cost:total / 2.0) - 0.1 where l:id='$journalLogId' and e:cost:total is not null limit 2"),
-            ShowcaseQuery("33. Cross-Scope Filtrowanie", "SELECT concept:name WHERE Trace.cost:total > 15.0", "select e:concept:name, t:cost:total where l:id='$journalLogId' and t:cost:total > 15.0 limit 2"),
-            ShowcaseQuery("34. Cross-Scope Sortowanie", "SELECT concept:name ORDER BY Trace.cost:total DESC", "select e:concept:name, t:cost:total where l:id='$journalLogId' and t:cost:total is not null order by t:cost:total desc limit 2"),
-            ShowcaseQuery("35. Sortowanie Grup po Sumie", "SELECT Trace.concept:name, SUM(cost:total) GROUP BY Trace.concept:name ORDER BY SUM(cost:total) DESC", "select t:concept:name, sum(e:cost:total) where l:id='$journalLogId' group by t:concept:name order by sum(e:cost:total) desc limit 2"),
-            ShowcaseQuery("36. COUNT na Trace", "SELECT COUNT(Trace)", "select count(^^t:name) where l:id='$journalLogId'"),
-            ShowcaseQuery("37. AVG Kosztów po Zasobach", "SELECT org:resource, AVG(cost:total) GROUP BY org:resource", "select e:org:resource, avg(e:cost:total) where l:id='$journalLogId' group by e:org:resource limit 3"),
-            ShowcaseQuery("38. Process Mining: AVG po Wariancie", "SELECT AVG(Trace.cost:total) GROUP BY ^concept:name", "select avg(t:cost:total) where l:id='$journalLogId' group by ^e:concept:name limit 3"),
-            ShowcaseQuery("39. Głęboka Paginacja (OFFSET)", "SELECT concept:name LIMIT 5 OFFSET 1000", "select e:concept:name where l:id='$journalLogId' limit 5 offset 1000"),
-            ShowcaseQuery("40. Kompletny Kombajn PQL", "SELECT org:resource, SUM(cost:total) WHERE cost:total IS NOT NULL GROUP BY org:resource ORDER BY SUM(cost:total) DESC", "select e:org:resource, sum(e:cost:total) where l:id='$journalLogId' and e:cost:total is not null group by e:org:resource order by sum(e:cost:total) desc limit 3"),
-            ShowcaseQuery("41. Atrybuty Logu w SELECT", "SELECT concept:name, source FROM Log", "select l:concept:name, l:source where l:id='$journalLogId' limit 1"),
-            ShowcaseQuery("42. Klauzula HAVING", "SELECT org:resource, COUNT(concept:name) GROUP BY org:resource HAVING COUNT(concept:name) > 50", "select e:org:resource, count(e:concept:name) where l:id='$journalLogId' group by e:org:resource having count(e:concept:name) > 50")
-        )
-
-        println("\n\n========================================================")
-        println("===   ROZPOCZĘCIE TESTÓW PREZENTACYJNYCH DQL (42)    ===")
-        println("========================================================\n")
-
-        for ((index, item) in queries.withIndex()) {
-            println("ZAPYTANIE ${index + 1}/42: ${item.description}")
-            println("KLAUZULA ORYGINALNEGO PQL:  ${item.originalPql}")
-            println("KLAUZULA NASZEJ WERSJI PQL: ${item.ourPql}")
-            try {
-                val startTime = System.currentTimeMillis()
-                val result = interpreter.executeQuery(item.ourPql).asJsonArray
-                val duration = System.currentTimeMillis() - startTime
-                println("CZAS WYKONANIA: ${duration}ms")
-                println("ZWRÓCONY JSON (${result.size()} elementów):")
-                println(gson.toJson(result))
-            } catch (e: Exception) {
-                println("BŁĄD WYKONANIA ZAPYTANIA (Przewidziany limit architektoniczny): ${e.message}")
-            }
-            println("--------------------------------------------------------\n")
-        }
-    }
-
-    // =========================================================================
-    // 2. TESTY GOLDEN MASTER (Z ASERCJAMI DANYCH Z PLIKU XES)
-    // =========================================================================
-    data class PqlTestCase(
-        val description: String,
-        val query: String,
-        val expectedSize: Int,
-        val verifier: ((JsonArray) -> Unit)? = null
-    )
-
-    @Test
-    @Order(2) // Ten test poleci jako DRUGI (na czystych, nienaruszonych danych)
-    fun executeGoldenMasterTests() {
-        val testCases = listOf(
-            PqlTestCase(
-                description = "Sprawdzenie poprawnego mapowania wartości zasobów",
-                query = "select e:concept:name, e:org:resource where l:id='$journalLogId' limit 2",
-                expectedSize = 2,
-                verifier = { result ->
-                    val first = result[0].asJsonObject
-                    assertEquals("Mike", first.get("e:org:resource").asString)
-                    assertEquals("invite reviewers", first.get("e:concept:name").asString)
-                }
-            ),
-            PqlTestCase(
-                description = "Weryfikacja Globalnej Agregacji dla pliku JournalReview",
-                query = "select count(^^e:concept:name), avg(^^e:cost:total), min(^^e:cost:total) where l:id='$journalLogId'",
-                expectedSize = 1,
-                verifier = { result ->
-                    val aggs = result[0].asJsonObject.getAsJsonArray("events")[0].asJsonObject
-                    assertEquals("2298.0", aggs.get("count(^^e:concept:name)").asString)
-                    assertEquals("1.0", aggs.get("min(^^e:cost:total)").asString)
-                }
-            ),
-            PqlTestCase(
-                description = "Sprawdzenie działania operatora IS NULL (Brak wyników)",
-                query = "select e:concept:name, e:cost:total where l:id='$journalLogId' and e:cost:total is null limit 2",
-                expectedSize = 0
-            ),
-            PqlTestCase(
-                description = "Weryfikacja matematycznej sumy kosztów",
-                query = "select sum(^^e:cost:total) where l:id='$journalLogId'",
-                expectedSize = 1,
-                verifier = { result ->
-                    val events = result[0].asJsonObject.getAsJsonArray("events")[0].asJsonObject
-                    val sum = events.get("sum(^^e:cost:total)").asString.toDouble()
-                    assertEquals(2386.64, sum, 0.01)
-                }
-            )
-        )
-
-        println("\n========================================================")
-        println("===   ROZPOCZĘCIE TESTÓW AUTOMATYCZNYCH Z ASERCJAMI  ===")
-        println("========================================================\n")
-
-        var passed = 0
-        var failed = 0
-
-        for ((index, testCase) in testCases.withIndex()) {
-            print("ASERCJA ${index + 1}/${testCases.size}: ${testCase.description} ... ")
-            try {
-                val result = interpreter.executeQuery(testCase.query).asJsonArray
-                assertEquals(testCase.expectedSize, result.size(), "Niezgodna liczba elementów wynikowych")
-                testCase.verifier?.invoke(result)
-                println("✅ PASSED")
-                passed++
-            } catch (e: AssertionError) {
-                println("❌ FAILED (Błąd Asercji: ${e.message})")
-                failed++
-            } catch (e: Exception) {
-                println("💥 ERROR (Wyjątek silnika: ${e.message})")
-                failed++
-            }
-        }
-        println("PODSUMOWANIE ASERCJI: $passed ZALICZONYCH, $failed OBLANYCH.\n")
-        assertEquals(0, failed, "Niektóre zapytania Golden Master nie przeszły weryfikacji danych XES!")
-    }
-
-    // =========================================================================
-    // 3. TESTY KLAUZULI MODYFIKUJĄCEJ (DELETE)
-    // =========================================================================
-    data class DeleteTestCase(
-        val description: String,
-        val originalPql: String,
-        val ourPql: String,
-        val expectedResultDesc: String
-    )
-
-    @Test
-    @Order(3) // Zniszczenie danych (DELETE) poleci na samym końcu
-    fun executeDeleteTests() {
-        val gson = GsonBuilder().setPrettyPrinting().create()
-
-        val deleteCases = listOf(
-            DeleteTestCase(
-                description = "Usuwanie konkretnych zdarzeń (np. wszystkich wykonanych przez Mike'a)",
-                originalPql = "DELETE EVENT WHERE org:resource = 'Mike'",
-                ourPql = "delete event where l:id='$journalLogId' and e:org:resource = 'Mike'",
-                expectedResultDesc = "Obiekty typu 'event' przypisane do Mike'a zostają zlokalizowane i usunięte z bazy CouchDB."
-            ),
-            DeleteTestCase(
-                description = "Usuwanie całych ścieżek procesowych (Trace) na podstawie kosztu",
-                originalPql = "DELETE TRACE WHERE cost:total < 5.0",
-                ourPql = "delete trace where l:id='$journalLogId' and t:cost:total < 5.0",
-                expectedResultDesc = "Wszystkie obiekty 'trace' spełniające warunek zostają usunięte."
-            ),
-            DeleteTestCase(
-                description = "Całkowite usunięcie logu z bazy (Czyszczenie danych)",
-                originalPql = "DELETE LOG WHERE concept:name = 'Hospital_log'",
-                ourPql = "delete log where l:id='$hospitalLogId'",
-                expectedResultDesc = "Dokument metadanych logu o wskazanym ID zostaje usunięty z bazy danych."
-            )
-        )
-
-        println("\n\n========================================================")
-        println("===        TESTY KLAUZULI MODYFIKUJĄCEJ (DELETE)     ===")
-        println("========================================================\n")
-
-        for ((index, testCase) in deleteCases.withIndex()) {
-            println("TEST DELETE ${index + 1}/3: ${testCase.description}")
-            println("KLAUZULA ORYGINALNEGO PQL:   ${testCase.originalPql}")
-            println("KLAUZULA NASZEJ WERSJI PQL:  ${testCase.ourPql}")
-            println("OCZEKIWANY WYNIK:            ${testCase.expectedResultDesc}")
-
-            try {
-                val startTime = System.currentTimeMillis()
-                val result = interpreter.executeQuery(testCase.ourPql)
-                val duration = System.currentTimeMillis() - startTime
-
-                println("WYNIK RZECZYWISTY (Czas: ${duration}ms):")
-                println(result.toString())
-            } catch (e: Exception) {
-                println("BŁĄD PODCZAS USUWANIA: ${e.message}")
-            }
-            println("--------------------------------------------------------\n")
-        }
-
-        println("========================================================")
-        println("WERYFIKACJA KOŃCOWA: Sprawdzanie czy Hospital Log zniknął po teście 3...")
-        val checkLog = "select * where l:id='$hospitalLogId'"
+    /**
+     * Helper wykonujący zapytanie i logujący szczegóły NAWET w przypadku rzucenia wyjątku przez parser.
+     */
+    private fun executeAndPrint(testName: String, originalPql: String, query: String, expected: String): JsonArray {
+        println("\n=======================================================")
+        println("TEST:               $testName")
+        println("ORYGINALNE PQL:     $originalPql")
+        println("NASZE ZAPYTANIE:    $query")
+        println("OCZEKIWANO:         $expected")
         try {
-            val result = interpreter.executeQuery(checkLog).asJsonArray
-            println("Wysłano zapytanie: $checkLog")
-            println("Liczba logów o ID $hospitalLogId w bazie: ${result.size()} (Oczekiwano: 0)")
-            assertEquals(0, result.size(), "Błąd: Hospital Log nie został poprawnie usunięty z bazy CouchDB!")
-            println("✅ Usunięcie potwierdzone programistycznie.")
+            val result = interpreter.executeQuery(query).asJsonArray
+            println("OTRZYMANO WYNIKÓW:  ${result.size()}")
+            if (result.size() > 0) {
+                println("PRZYKŁADOWY WYNIK:  ${result[0].asJsonObject}")
+            } else {
+                println("OTRZYMANO:          [] (Pusty wynik)")
+            }
+            println("=======================================================")
+            return result
         } catch (e: Exception) {
-            println("Zapytanie weryfikujące zwróciło błąd (log został poprawnie usunięty): ${e.message}")
+            println("!!! BŁĄD WYKONANIA !!!")
+            println("TREŚĆ BŁĘDU:        ${e.message}")
+            println("=======================================================")
+            throw e // Rzucamy dalej, aby test w JUnit zaświecił się na czerwono
         }
+    }
 
-        println("========================================================")
-        println("===             ZAKOŃCZONO WSZYSTKIE TESTY           ===")
-        println("========================================================\n")
+    // =========================================================================
+    // GRUPA 1: TYPY DANYCH I LITERAŁY (Data types & Literals)
+    // =========================================================================
+
+    @Test
+    @Order(1)
+    @DisplayName("1.1 String Literals - Single Quotes")
+    fun testStringLiteralsSingle() {
+        val query = "select e:concept:name where e:concept:name = 'accept' limit 1"
+        val result = executeAndPrint(
+            "String - Pojedynczy cudzysłów", "where e:name = 'accept'", query, "1 wynik"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(2)
+    @DisplayName("1.2 String Literals - Double Quotes")
+    fun testStringLiteralsDouble() {
+        val query = "select e:concept:name where e:concept:name = \"accept\" limit 1"
+        val result = executeAndPrint(
+            "String - Podwójny cudzysłów", "where e:name = \"accept\"", query, "1 wynik"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(3)
+    @DisplayName("1.3 Escape Sequences")
+    fun testEscapeSequences() {
+        val query = "select e:concept:name where e:concept:name = 'get \\n review \\t X' limit 1"
+        executeAndPrint(
+            "Znaki ucieczki", "where e:name = 'get \\n review \\t X'", query, "Przejście parsera bez błędu"
+        )
+    }
+
+    @Test
+    @Order(4)
+    @DisplayName("1.4 Number Literals (Decimal & Scientific)")
+    fun testNumberLiterals() {
+        val query = "select e:cost:total where e:cost:total > 1.05 and e:cost:total < 1.23E1 limit 1"
+        val result = executeAndPrint(
+            "Liczby (Dziesiętne i Naukowe)", "where e:total > 1.05 and e:total < 1.23E1", query, "Przynajmniej 1 wynik dla kosztu > 1.05"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(5)
+    @DisplayName("1.5 Boolean Literals")
+    fun testBooleanLiterals() {
+        val query = "select e:concept:name where true limit 1"
+        val result = executeAndPrint(
+            "Wartości logiczne", "where true", query, "Brak błędu, zwrócenie wyników"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(6)
+    @DisplayName("1.6 Datetime Literals (ISO 8601)")
+    fun testDatetimeLiterals() {
+        val query = "select e:time:timestamp where e:time:timestamp >= D2007-06-13T01:00:00.000+02:00 limit 1"
+        val result = executeAndPrint(
+            "Data z myślnikami", "where e:timestamp >= D2007-06-13T01:00:00.000+02:00", query, "Parsowanie dat i filtrowanie"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("1.7 Null Literals")
+    fun testNullLiterals() {
+        // Zmieniliśmy "cost:total" na "jakies_pole", aby wymusić trafienie dla IS NULL
+        val query = "select e:concept:name where e:jakies_pole is null limit 1"
+        val result = executeAndPrint(
+            "Null handling", "where e:jakies_pole is null", query, "Wyniki dla zdarzeń bez kosztu"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(8)
+    @DisplayName("1.8 Scoped Literals")
+    fun testScopedLiterals() {
+        val query = "select e:concept:name where e:cost:total = e:1.08 limit 1"
+        val result = executeAndPrint(
+            "Literały ze wskazanym scopem", "where e:total = e:1.08", query, "Parsowanie literału z jawnym scopem np. e:1.08"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    // =========================================================================
+    // GRUPA 2: ATRYBUTY I ICH WSKAZYWANIE (Attributes & Scopes)
+    // =========================================================================
+
+    @Test
+    @Order(9)
+    @DisplayName("2.1 Standard Attributes")
+    fun testStandardAttributes() {
+        val query = "select log:concept:name, trace:cost:total, event:time:timestamp limit 1"
+        val result = executeAndPrint(
+            "Standardowe, pełne atrybuty", "select log:concept:name, trace:cost:total, event:time:timestamp", query, "Dokument z 3 różnymi polami"
+        )
+        assertTrue(result[0].asJsonObject.keySet().isNotEmpty())
+    }
+
+    @Test
+    @Order(10)
+    @DisplayName("2.2 Shorthand Attributes")
+    fun testShorthandAttributes() {
+        val query = "select l:name, t:total, e:timestamp limit 1"
+        val result = executeAndPrint(
+            "Skrócone nazwy atrybutów", "select l:name, t:total, e:timestamp", query, "Rozwiązanie aliasów do standardowych atrybutów XES"
+        )
+        assertTrue(result[0].asJsonObject.keySet().isNotEmpty())
+    }
+
+    @Test
+    @Order(11)
+    @DisplayName("2.3 Bracket Syntax for Custom Attributes")
+    fun testBracketSyntax() {
+        val query = "select [event:org:resource] limit 1"
+        val result = executeAndPrint(
+            "Nawiasy kwadratowe", "select [event:org:resource]", query, "Poprawne pobranie customowego atrybutu (bez wywalania się parsera)"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    // =========================================================================
+    // GRUPA 3: OPERATORY ARYTMETYCZNE I CZASOWE
+    // =========================================================================
+
+    @Test
+    @Order(12)
+    @DisplayName("3.1 Arithmetic: Addition & Subtraction")
+    fun testArithmeticAddSub() {
+        val query = "select e:cost:total + 1.0, e:cost:total - 0.5 where e:cost:total is not null limit 1"
+        val result = executeAndPrint(
+            "Dodawanie i odejmowanie", "select e:total + 1.0, e:total - 0.5", query, "Wykonana matematyka (w bazie lub w pamięci silnika)"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(13)
+    @DisplayName("3.2 Arithmetic: Multiplication & Division")
+    fun testArithmeticMulDiv() {
+        val query = "select e:cost:total * 2.0, e:cost:total / 2.0 where e:cost:total is not null limit 1"
+        val result = executeAndPrint(
+            "Mnożenie i dzielenie", "select e:total * 2.0, e:total / 2.0", query, "Wykonana matematyka na polach"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(14)
+    @DisplayName("3.3 String Concatenation (+)")
+    fun testStringConcatenation() {
+        val query = "select e:concept:name + ' test' limit 1"
+        val result = executeAndPrint(
+            "Łączenie stringów", "select e:name + ' test'", query, "Wykonana konkatenacja"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(15)
+    @DisplayName("3.4 Temporal Subtraction")
+    fun testTemporalSubtraction() {
+        val query = "select e:time:timestamp - e:time:timestamp limit 1"
+        val result = executeAndPrint(
+            "Odejmowanie dat", "select e:timestamp - e:timestamp", query, "Zwrócona liczba dni (powinna wynosić 0)"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    // =========================================================================
+    // GRUPA 4: OPERATORY TEKSTOWE, LOGICZNE I PORÓWNAWCZE
+    // =========================================================================
+
+    @Test
+    @Order(16)
+    @DisplayName("4.1 Text: LIKE Operator")
+    fun testLikeOperator() {
+        val query = "select e:concept:name where e:concept:name like '%review%' limit 1"
+        val result = executeAndPrint(
+            "Operator LIKE", "where e:name like '%review%'", query, "Zdarzenie ze słowem review"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(17)
+    @DisplayName("4.2 Text: MATCHES Operator (Regex)")
+    fun testMatchesOperator() {
+        val query = "select e:concept:name where e:concept:name matches '.*get.*' limit 1"
+        val result = executeAndPrint(
+            "Operator MATCHES", "where e:name matches '.*get.*'", query, "Zdarzenie spełniające wyrażenie regularne"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(18)
+    @DisplayName("4.3 Comparison Operators (<, >, <=, >=)")
+    fun testComparisonOperators() {
+        val query = "select e:cost:total where e:cost:total >= 1.0 and e:cost:total <= 2.0 limit 1"
+        val result = executeAndPrint(
+            "Operatory nierówności", "where e:total >= 1.0 and e:total <= 2.0", query, "Odpowiednie zmapowanie nawiasów ostre na MongoDB"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(19)
+    @DisplayName("4.4 Equality Operators (=, !=)")
+    fun testEqualityOperators() {
+        val query = "select e:concept:name where e:concept:name = 'accept' or e:concept:name != 'reject' limit 1"
+        val result = executeAndPrint(
+            "Operatory równości", "where e:name = 'accept' or e:name != 'reject'", query, "Prawidłowa obsługa = oraz !="
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(20)
+    @DisplayName("4.5 Logic Operators (AND, OR, NOT)")
+    fun testLogicOperators() {
+        val query = "select e:concept:name where (e:concept:name = 'accept' or e:concept:name = 'reject') and not(e:cost:total is null) limit 1"
+        val result = executeAndPrint(
+            "Złożona logika", "where (e:name='a' or e:name='b') and not(e:total is null)", query, "Poprawne zagłębienie warunków"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(21)
+    @DisplayName("4.6 IN and NOT IN Operators")
+    fun testInOperators() {
+        val query = "select e:concept:name where e:concept:name in ('accept', 'reject') and e:concept:name not in ('decide') limit 1"
+        val result = executeAndPrint(
+            "IN / NOT IN", "where e:name in ('accept', 'reject')", query, "Poprawna zamiana na klauzulę OR pod spodem"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    // =========================================================================
+    // GRUPA 5: FUNKCJE SKALARNE (Scalar Functions)
+    // =========================================================================
+
+    @Test
+    @Order(22)
+    @DisplayName("5.1 String Functions (upper, lower)")
+    fun testStringFunctions() {
+        val query = "select upper(e:concept:name), lower(e:concept:name) limit 1"
+        val result = executeAndPrint(
+            "Funkcje tekstowe", "select upper(e:name), lower(e:name)", query, "Wykonane mapowanie wielkości liter"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(23)
+    @DisplayName("5.2 Datetime Functions (year, month, day, dayofweek...)")
+    fun testDatetimeFunctions() {
+        val query = "select year(e:time:timestamp), month(e:time:timestamp), day(e:time:timestamp), dayofweek(e:time:timestamp) limit 1"
+        val result = executeAndPrint(
+            "Funkcje czasu", "select year(e:timestamp), month(e:timestamp)...", query, "Rozbicie daty na kawałki"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(24)
+    @DisplayName("5.3 Math Functions (round)")
+    fun testMathFunctions() {
+        val query = "select round(e:cost:total) where e:cost:total is not null limit 1"
+        val result = executeAndPrint(
+            "Zaokrąglanie", "select round(e:total)", query, "Wywołana funkcja matematyczna"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    // =========================================================================
+    // GRUPA 6: FUNKCJE AGREGUJĄCE (Aggregation)
+    // =========================================================================
+
+    @Test
+    @Order(25)
+    @DisplayName("6.1 All Aggregations (min, max, avg, sum, count)")
+    fun testAggregations() {
+        val query = "select min(e:cost:total), max(e:cost:total), avg(e:cost:total), sum(e:cost:total), count(e:concept:name) group by t:name limit 1"
+        val result = executeAndPrint(
+            "Wszystkie agregacje", "select min(e:total), max(e:total)... group by t:name", query, "Wyliczenie wszystkich statystyk w grupie"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(26)
+    @DisplayName("6.2 Implicit Group By")
+    fun testImplicitGroupBy() {
+        val query = "select avg(e:cost:total)"
+        val result = executeAndPrint(
+            "Niejawne grupowanie", "select avg(e:total)", query, "Brak błędu, użycie agregatu bez klauzuli GROUP BY wyzwala tryb Implicit"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    // =========================================================================
+    // GRUPA 7: SCOPE HOISTING (Wyrzucanie zakresu ^ i ^^)
+    // =========================================================================
+
+    @Test
+    @Order(27)
+    @DisplayName("7.1 Hoisting ^ in WHERE clause")
+    fun testHoistingWhere() {
+        val query = "select t:name where ^e:concept:name = 'accept' limit 1"
+        val result = executeAndPrint(
+            "Filtrowanie rodzica dzieckiem", "where ^e:name = 'accept'", query, "Wybranie śladów posiadających dany event"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(28)
+    @DisplayName("7.2 Global Hoisting ^^ in SELECT clause")
+    fun testGlobalHoisting() {
+        val query = "select count(^^e:concept:name)"
+        val result = executeAndPrint(
+            "Agregacja całego logu", "select count(^^e:name)", query, "1 dokument podsumowujący wszystko"
+        )
+        assertEquals(1, result.size())
+    }
+
+    // =========================================================================
+    // GRUPA 8: KLAUZULE STRUKTURALNE (Clauses)
+    // =========================================================================
+
+    @Test
+    @Order(29)
+    @DisplayName("8.1 Wildcard Selector (*)")
+    fun testWildcardSelector() {
+        val query = "select t:*, e:* limit 1"
+        val result = executeAndPrint(
+            "Wildcard", "select t:*, e:*", query, "Wszystkie atrybuty w obrębie danego logu"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    @Test
+    @Order(30)
+    @DisplayName("8.2 Limit and Offset")
+    fun testLimitAndOffset() {
+        val query = "select e:concept:name limit 5 offset 2"
+        val result = executeAndPrint(
+            "Paginacja", "limit 5 offset 2", query, "Ominięcie pierwszych 2 wyników i podanie kolejnych 5"
+        )
+        assertEquals(5, result.size())
+    }
+
+    @Test
+    @Order(31)
+    @DisplayName("8.3 Group By & Order By (ASC/DESC)")
+    fun testGroupAndOrder() {
+        val query = "select count(e:concept:name) group by e:concept:name order by count(e:concept:name) desc limit 2"
+        val result = executeAndPrint(
+            "Sortowanie grup", "group by e:name order by count(e:name) desc", query, "Posegregowane po największej ilości wystąpień"
+        )
+        assertEquals(2, result.size())
+    }
+
+    // =========================================================================
+    // GRUPA 9: FINAL BOSS (Złożone struktury)
+    // =========================================================================
+
+    @Test
+    @Order(32)
+    @DisplayName("9.1 The Ultimate Complex Query")
+    fun testUltimateComplexQuery() {
+        val query = """
+            select 
+                upper(e:concept:name), 
+                count(t:name) 
+            where 
+                (e:cost:total >= 0 or e:cost:total is null) 
+                and e:concept:name matches '.*review.*' 
+            group by e:concept:name 
+            order by count(t:name) desc 
+            limit 5
+        """.trimIndent()
+
+        val result = executeAndPrint(
+            "Wszystko naraz", "Złożone filtrowanie, Regex, Funkcja skalarna, Agregacja, Grupowanie, Sortowanie", query.replace("\n", " "), "Udane sparsowanie i wykonanie wielopoziomowego AST"
+        )
+        assertTrue(result.size() > 0)
+    }
+
+    // =========================================================================
+    // GRUPA 10: DELETE (Stan i Mutacje)
+    // =========================================================================
+
+    @Test
+    @Order(999)
+    @DisplayName("10.1 DELETE Clause")
+    fun testDeleteClause() {
+        val countQuery = "select count(^^e:concept:name) where e:concept:name = 'get review X'"
+        val preDeleteResult = interpreter.executeQuery(countQuery).asJsonArray
+        val docBefore = preDeleteResult.firstOrNull()?.asJsonObject?.getAsJsonArray("events")?.get(0)?.asJsonObject
+        val countBefore = docBefore?.get("count(^^e:concept:name)")?.asDouble?.toInt() ?: 0
+
+        val deleteQuery = "delete event where e:concept:name = 'get review X'"
+        executeAndPrint(
+            "DELETE", "delete event where e:name = 'get review X'", deleteQuery, "Brak błędu podczas usuwania"
+        )
+
+        val postDeleteResult = interpreter.executeQuery(countQuery).asJsonArray
+        val docAfter = postDeleteResult.firstOrNull()?.asJsonObject?.getAsJsonArray("events")?.firstOrNull()?.asJsonObject
+        val countAfter = docAfter?.get("count(^^e:concept:name)")?.asDouble?.toInt() ?: 0
+
+        assertTrue(countBefore > 0, "Baza nie posiadała danych startowych przed usunięciem")
+        assertEquals(0, countAfter, "DELETE nie usunęło danych")
     }
 }

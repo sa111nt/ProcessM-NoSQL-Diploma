@@ -27,7 +27,6 @@ class PqlToCouchDbTranslator(
                     })
                 }
             }
-
             mergeSelectors(baseSelector, conditionJson)
         } else {
             baseSelector
@@ -37,17 +36,6 @@ class PqlToCouchDbTranslator(
             add("selector", conditionSelector)
             query.limit?.let { addProperty("limit", it) }
             query.offset?.let { addProperty("skip", it) }
-        }
-
-        if (query.orderBy.isNotEmpty()) {
-            val sortArray = JsonArray()
-            for (order in query.orderBy) {
-                val sortField = fieldMapper.resolve(order.scope, order.attribute).toDotPath()
-                val sortObject = JsonObject()
-                sortObject.addProperty(sortField, order.direction.name.lowercase())
-                sortArray.add(sortObject)
-            }
-            json.add("sort", sortArray)
         }
 
         return json
@@ -70,7 +58,6 @@ class PqlToCouchDbTranslator(
                     })
                 }
             }
-
             mergeSelectors(baseSelector, conditionJson)
         } else {
             baseSelector
@@ -85,18 +72,9 @@ class PqlToCouchDbTranslator(
         }
 
         if (query.groupBy.isEmpty() && query.orderBy.isNotEmpty()) {
-            val sortArray = JsonArray()
-            for (order in query.orderBy) {
-                if (order.scope == query.collection) {
-                    val sortField = fieldMapper.resolve(order.scope, order.attribute).toDotPath()
-                    val sortObject = JsonObject()
-                    sortObject.addProperty(sortField, order.direction.name.lowercase())
-                    sortArray.add(sortObject)
-                }
-            }
-            if (sortArray.size() > 0) {
-                json.add("sort", sortArray)
-            }
+            json.remove("limit")
+            json.remove("skip")
+            json.addProperty("limit", 100000)
         }
 
         return json
@@ -174,9 +152,19 @@ class PqlToCouchDbTranslator(
         condition: PqlCondition.Simple,
         collectionScope: PqlScope
     ): JsonObject {
+        var dotPath = fieldMapper.resolve(condition.scope, condition.attribute).toDotPath()
 
-        // ZMIANA: Zamiast struktury zagnieżdżonej pobieramy płaską ścieżkę (dot notation)
-        val dotPath = fieldMapper.resolve(condition.scope, condition.attribute).toDotPath()
+        // 🚨 NAPRAWA BŁĘDU MAPOWANIA KLUCZY OBCYCH 🚨
+        // Jeśli szukamy w Eventach, a ktoś prosi o l:id, musimy szukać po "logId", a nie po "_id" eventu!
+        val attrLower = condition.attribute.lowercase()
+        if (condition.scope != collectionScope && (attrLower == "id" || attrLower == "_id")) {
+            if (condition.scope == PqlScope.LOG) {
+                dotPath = "logId"
+            } else if (condition.scope == PqlScope.TRACE) {
+                dotPath = "traceId"
+            }
+        }
+
         val conditionObject = JsonObject()
 
         when (condition.operator) {
@@ -212,7 +200,7 @@ class PqlToCouchDbTranslator(
         }
 
         val result = JsonObject()
-        result.add(dotPath, conditionObject) // Tworzymy poprawny selektor typu: {"xes_attributes.org:resource": {"$eq": "Pete"}}
+        result.add(dotPath, conditionObject)
         return result
     }
 
@@ -220,18 +208,14 @@ class PqlToCouchDbTranslator(
         return when (value) {
             null -> com.google.gson.JsonNull.INSTANCE
             is String -> {
-                // Jeśli to liczba, pozostawiamy ją jako String lub przekształcamy,
-                // XES najczęściej trzyma liczby jako stringi ("1.0"), więc operator CouchDB musi to zrozumieć.
-                // Pozostawiamy logikę, która pozwala operować na tekstowych wartościach z bazy.
                 when {
                     value == "true" -> com.google.gson.JsonPrimitive(true)
                     value == "false" -> com.google.gson.JsonPrimitive(false)
                     value == "null" -> com.google.gson.JsonNull.INSTANCE
-                    // Zostawiamy wartości jako stringi w celu poprawnego mapowania z formatem XES z bazy
                     else -> com.google.gson.JsonPrimitive(value)
                 }
             }
-            is Number -> com.google.gson.JsonPrimitive(value.toString()) // Zabezpieczenie przed Strict-Type w CouchDB
+            is Number -> com.google.gson.JsonPrimitive(value.toString())
             is Boolean -> com.google.gson.JsonPrimitive(value)
             is List<*> -> {
                 JsonArray().apply {

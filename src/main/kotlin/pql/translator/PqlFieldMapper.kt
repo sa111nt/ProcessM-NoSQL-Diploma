@@ -9,10 +9,12 @@ data class FieldPath(val segments: List<String>) {
 class PqlFieldMapper {
 
     fun resolve(scope: PqlScope, attribute: String): FieldPath {
+        // POPRAWKA: Usunięcie znaków hoisting'u (^^, ^) przed mapowaniem dla bazy danych
+        val cleanAttribute = attribute.removePrefix("^^").removePrefix("^")
         val segments = when (scope) {
-            PqlScope.LOG -> resolveLog(attribute)
-            PqlScope.TRACE -> resolveTrace(attribute)
-            PqlScope.EVENT -> resolveEvent(attribute)
+            PqlScope.LOG -> resolveLog(cleanAttribute)
+            PqlScope.TRACE -> resolveTrace(cleanAttribute)
+            PqlScope.EVENT -> resolveEvent(cleanAttribute)
         }
         return FieldPath(segments)
     }
@@ -40,4 +42,3 @@ class PqlFieldMapper {
         else -> listOf("xes_attributes", attribute)
     }
 }
-

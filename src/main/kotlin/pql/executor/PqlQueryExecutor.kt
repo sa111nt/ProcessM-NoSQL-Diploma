@@ -12,15 +12,6 @@ import pql.model.SortDirection
 import java.time.OffsetDateTime
 import java.time.format.DateTimeParseException
 
-/**
- * Główny koordynator wykonywania zapytań PQL.
- * * Klasa odpowiada za pełny cykl życia zapytania:
- * 1. Tłumaczenie struktury PqlQuery na natywne zapytania Mango JSON (CouchDB).
- * 2. Rozwiązywanie relacji między logami, śladami i zdarzeniami (Cross-Scope).
- * 3. Wykonywanie zapytań w bazie oraz pobieranie brakujących dokumentów nadrzędnych.
- * 4. Pamięciowe grupowanie (Process Mining & SQL) oraz wyliczanie agregacji/matematyki.
- * 5. Formatowanie końcowych wyników dla klienta.
- */
 class PqlQueryExecutor(
     private val dbManager: CouchDBManager,
     private val dbName: String
@@ -29,20 +20,11 @@ class PqlQueryExecutor(
     private val fieldMapper = PqlFieldMapper()
     private val formatter = PqlResultFormatter(fieldMapper)
 
-    /**
-     * Główna metoda wykonująca zapytanie.
-     * @param query Sparsowany obiekt zapytania PQL.
-     * @return JsonArray zawierający sformatowane wyniki spełniające warunki zapytania.
-     */
     fun execute(query: PqlQuery): JsonArray {
         if (query.conditions.any { it is PqlCondition.AlwaysFalse }) {
             return JsonArray()
         }
 
-        // --- OPTYMALIZACJA: Spłaszczanie warunków AND ---
-        // Parser często grupuje warunki w jedno drzewo PqlCondition.And.
-        // Musimy je rozbić na płaską listę, by poprawnie oddzielić filtry relacyjne (l:id)
-        // od docelowych filtrów na zdarzeniach (np. e:org:resource).
         val flatConditions = mutableListOf<PqlCondition>()
         fun flatten(c: PqlCondition) {
             if (c is PqlCondition.And) {
@@ -53,20 +35,26 @@ class PqlQueryExecutor(
         }
         query.conditions.forEach { flatten(it) }
 
-        // --- 1. MOST RELACYJNY (Cross-Scope) ---
+        // --- MOST RELACYJNY (Cross-Scope) ---
         val crossScopeConditions = flatConditions.filter { getCrossScope(it, query.collection) != null }
         val sameScopeConditions = flatConditions.filter { getCrossScope(it, query.collection) == null }
         var resolvedQuery = query.copy(conditions = sameScopeConditions)
 
         if (crossScopeConditions.isNotEmpty()) {
-            val outerScope = crossScopeConditions.firstNotNullOfOrNull { getCrossScope(it, query.collection) }!!
-            // Przekazujemy TYLKO warunki cross-scope, aby nie szukać właściwości eventów w logach
+            println("[DEBUG EXECUTOR] Wykryto warunki Cross-Scope: ${crossScopeConditions.map { if (it is PqlCondition.Simple) it.attribute else "complex" }}")
             val parentIds = resolveCrossScopeConditions(crossScopeConditions, query.collection)
 
+            println("[DEBUG EXECUTOR] Znaleziono powiązanych dokumentów-rodziców: ${parentIds.size}")
             if (parentIds.isEmpty()) return JsonArray()
 
-            val filterField = if (outerScope == PqlScope.LOG && query.collection == PqlScope.EVENT) "traceId"
-            else if (outerScope == PqlScope.LOG) "logId" else "traceId"
+            val outerScope = crossScopeConditions.firstNotNullOfOrNull { getCrossScope(it, query.collection) }
+
+            val filterField = when {
+                query.collection == PqlScope.EVENT && outerScope == PqlScope.TRACE -> "traceId"
+                query.collection == PqlScope.EVENT && outerScope == PqlScope.LOG -> "logId"
+                query.collection == PqlScope.TRACE && outerScope == PqlScope.LOG -> "logId"
+                else -> "traceId"
+            }
 
             val idCondition = if (parentIds.size == 1) {
                 PqlCondition.Simple(query.collection, filterField, pql.model.PqlOperator.EQ, parentIds.first())
@@ -81,19 +69,15 @@ class PqlQueryExecutor(
         val hasAggregations = resolvedQuery.projections.any { hasAggregation(it) } ||
                 resolvedQuery.orderBy.any { hasAggregation(it) }
 
-        println("DEBUG EXECUTOR: hasAggregations=$hasAggregations, orderBySize=${resolvedQuery.orderBy.size}")
+        val usesMemoryProcessing = hasCrossScopeOrderBy || resolvedQuery.groupBy.isNotEmpty() || hasAggregations || resolvedQuery.orderBy.isNotEmpty()
 
-        // Usuwamy limity dla CouchDB, jeśli operacje wymagają pamięciowej obróbki
-        if (hasCrossScopeOrderBy || resolvedQuery.groupBy.isNotEmpty() || hasAggregations) {
+        if (usesMemoryProcessing) {
             mangoQuery.remove("limit")
             mangoQuery.remove("skip")
             mangoQuery.remove("sort")
             mangoQuery.addProperty("limit", 100000)
 
-            // --- OPTYMALIZACJA PAMIĘCI (PROJECTION PUSHDOWN) ---
             val requiredFields = mutableSetOf<String>()
-
-            // Zawsze potrzebujemy identyfikatorów i struktury do łączenia relacji
             requiredFields.add("_id")
             requiredFields.add("docType")
             requiredFields.add("traceId")
@@ -146,7 +130,6 @@ class PqlQueryExecutor(
                 extractFromExpr(order.arithmeticExpression)
             }
 
-            // Skanuj pola z klauzuli WHERE (żeby CouchDB mógł je odfiltrować!)
             resolvedQuery.conditions.forEach { cond ->
                 if (cond is PqlCondition.Simple) {
                     extractAttribute(cond.scope, cond.attribute)
@@ -156,26 +139,32 @@ class PqlQueryExecutor(
             val fieldsArray = JsonArray()
             requiredFields.forEach { fieldsArray.add(it) }
             mangoQuery.add("fields", fieldsArray)
-
-            println("DEBUG: Uruchomiono optymalizację pamięci. Pobierane pola: $requiredFields")
         }
 
-        if (resolvedQuery.orderBy.isNotEmpty() && !hasCrossScopeOrderBy && resolvedQuery.groupBy.isEmpty()) {
-            val indexFields = mutableListOf("docType")
-            for (order in resolvedQuery.orderBy) {
-                indexFields.add(fieldMapper.resolve(order.scope, order.attribute).toDotPath())
-            }
-            dbManager.ensureIndex(dbName, indexFields)
-        }
+        println("[DEBUG EXECUTOR] Ostateczne zapytanie Mango wysyłane do bazy:")
+        println(mangoQuery.toString())
 
         var rawResult: JsonArray = dbManager.findDocs(dbName, mangoQuery)
-
-        if (hasCrossScopeOrderBy && rawResult.size() > 0 && resolvedQuery.groupBy.isEmpty()) {
-            rawResult = executeCrossScopeOrderBy(rawResult, resolvedQuery)
-        }
+        println("[DEBUG EXECUTOR] Baza CouchDB zwróciła dokumentów: ${rawResult.size()}")
 
         if (resolvedQuery.groupBy.isNotEmpty() || hasAggregations) {
             return formatGroupedResponse(rawResult, resolvedQuery)
+        }
+
+        // POPRAWKA: Ewaluacja również dla funkcji skalarnych (np. upper), a nie tylko dla matematyki
+        if (resolvedQuery.projections.any { it.arithmeticExpression != null || (it.function != null && it.function !is pql.model.PqlFunction.AggregationFunction) }) {
+            rawResult = applyArithmeticExpressions(rawResult, resolvedQuery)
+        }
+
+        if (resolvedQuery.orderBy.isNotEmpty()) {
+            rawResult = executeMemoryOrderBy(rawResult, resolvedQuery)
+        } else if (usesMemoryProcessing) {
+            var stream = rawResult.asSequence()
+            query.offset?.let { stream = stream.drop(it) }
+            query.limit?.let { stream = stream.take(it) }
+            val truncated = JsonArray()
+            stream.forEach { truncated.add(it) }
+            rawResult = truncated
         }
 
         return formatter.format(rawResult, resolvedQuery)
@@ -199,11 +188,34 @@ class PqlQueryExecutor(
         }
     }
 
-    /**
-     * Sortuje wyniki w pamięci na podstawie atrybutów należących do nadrzędnego Scope'u
-     * (np. sortowanie zdarzeń po koszcie całego śladu t:cost).
-     */
-    private fun executeCrossScopeOrderBy(rawResult: JsonArray, query: PqlQuery): JsonArray {
+    private fun applyArithmeticExpressions(rawDocs: JsonArray, query: PqlQuery): JsonArray {
+        val enrichedDocs = JsonArray()
+
+        for (element in rawDocs) {
+            if (!element.isJsonObject) continue
+            val doc = element.asJsonObject
+
+            query.projections.filter { it.arithmeticExpression != null || (it.function != null && it.function !is pql.model.PqlFunction.AggregationFunction) }.forEach { proj ->
+
+                val value = if (proj.arithmeticExpression != null) {
+                    evaluateMath(listOf(doc), proj.arithmeticExpression!!, doc, doc)
+                } else if (proj.function != null) {
+                    evaluateFunction(listOf(doc), proj.function!!, doc, doc)
+                } else null
+
+                if (value != null) {
+                    val rawKey = proj.raw
+                    val cleanKey = proj.raw.replace(" ", "")
+                    doc.addProperty(rawKey, value.toString())
+                    doc.addProperty(cleanKey, value.toString())
+                }
+            }
+            enrichedDocs.add(doc)
+        }
+        return enrichedDocs
+    }
+
+    private fun executeMemoryOrderBy(rawResult: JsonArray, query: PqlQuery): JsonArray {
         val traceIds = mutableSetOf<String>()
         val logIds = mutableSetOf<String>()
 
@@ -254,12 +266,9 @@ class PqlQueryExecutor(
             }
         }
 
-        // PQL scope hierarchy: LOG (0) > TRACE (1) > EVENT (2)
-        val scopeOrderedBy = query.orderBy.sortedBy { it.scope.ordinal }
-
         val sortedList = rawResult.map { it.asJsonObject }.sortedWith(Comparator { a, b ->
             var cmp = 0
-            for (order in scopeOrderedBy) {
+            for (order in query.orderBy) {
                 val segments = fieldMapper.resolve(order.scope, order.attribute).segments
 
                 var valA = extractValueBySegments(a, segments)
@@ -276,7 +285,12 @@ class PqlQueryExecutor(
                     if (docB != null) valB = extractValueBySegments(docB, segments)
                 }
 
-                cmp = compareValues(valA, valB)
+                val numA = valA?.toString()?.toDoubleOrNull()
+                val numB = valB?.toString()?.toDoubleOrNull()
+                val finalValA = numA ?: valA
+                val finalValB = numB ?: valB
+
+                cmp = compareValues(finalValA, finalValB)
                 if (order.direction == SortDirection.DESC) {
                     cmp = -cmp
                 }
@@ -296,7 +310,16 @@ class PqlQueryExecutor(
 
     private fun getCrossScope(condition: PqlCondition, collectionScope: PqlScope): PqlScope? {
         return when (condition) {
-            is PqlCondition.Simple -> if (condition.scope != collectionScope) condition.scope else null
+            is PqlCondition.Simple -> {
+                if (condition.scope != collectionScope) {
+                    val attr = condition.attribute.lowercase()
+                    if (attr == "id" || attr == "_id") {
+                        return null
+                    }
+                    return condition.scope
+                }
+                null
+            }
             is PqlCondition.And -> condition.conditions.firstNotNullOfOrNull { getCrossScope(it, collectionScope) }
             is PqlCondition.Or -> condition.conditions.firstNotNullOfOrNull { getCrossScope(it, collectionScope) }
             is PqlCondition.Not -> getCrossScope(condition.condition, collectionScope)
@@ -315,6 +338,8 @@ class PqlQueryExecutor(
         )
         val outerCouchQuery = translator.translate(outerQuery)
         outerCouchQuery.addProperty("limit", 100000)
+
+        println("[DEBUG EXECUTOR - CrossScope] Szukam rodziców zapytaniem: $outerCouchQuery")
         val outerDocs = dbManager.findDocs(dbName, outerCouchQuery)
 
         val outerIds = outerDocs.mapNotNull { doc ->
@@ -342,10 +367,6 @@ class PqlQueryExecutor(
         return outerIds
     }
 
-    /**
-     * Wstrzykuje oryginalne właściwości śladu bezpośrednio do obiektu zdarzenia,
-     * aby zapobiec nadpisywaniu (tzw. shadowing) przez atrybuty XES o tych samych kluczach.
-     */
     private fun injectTraceAttributes(eventObj: JsonObject, traceDoc: JsonObject?) {
         if (traceDoc == null) return
         val traceName = traceDoc.get("originalTraceId")?.asString
@@ -361,13 +382,8 @@ class PqlQueryExecutor(
         }
     }
 
-    /**
-     * Główny hub kierujący do odpowiedniej strategii grupowania (warianty lub tradycyjne).
-     */
     private fun formatGroupedResponse(docs: JsonArray, query: PqlQuery): JsonArray {
-        // Tylko ^ (sequence variant), ale nie ^^ (global hoisting)
         val hoistedEventGroupField = query.groupBy.firstOrNull { it.attribute.startsWith("^") && !it.attribute.startsWith("^^") }
-
         return if (hoistedEventGroupField != null) {
             formatVariantGroupedResponse(docs, query, hoistedEventGroupField)
         } else {
@@ -375,9 +391,6 @@ class PqlQueryExecutor(
         }
     }
 
-    /**
-     * Sprawdza, czy w projekcjach lub klauzulach order by występuje funkcja agregująca z parametrem używającym ^^
-     */
     private fun hasGlobalHoistingAggregation(query: PqlQuery): Boolean {
         val checkFunc = { func: pql.model.PqlFunction? ->
             func is pql.model.PqlFunction.AggregationFunction && func.attribute?.startsWith("^^") == true
@@ -403,10 +416,6 @@ class PqlQueryExecutor(
         return inProj || inOrder
     }
 
-    /**
-     * Strategia grupowania płaskiego w stylu baz SQL.
-     * Grupuje zdarzenia na podstawie określonych atrybutów, wyliczając na nich agregacje.
-     */
     private fun formatFlatGroupedResponse(docs: JsonArray, query: PqlQuery): JsonArray {
         val traceIds = mutableSetOf<String>()
         val logIds = mutableSetOf<String>()
@@ -500,11 +509,11 @@ class PqlQueryExecutor(
             val tId = representative.get("traceId")?.asString ?: "unknown"
             val lId = representative.get("logId")?.asString ?: "unknown"
 
-            val formattedRep = formatter.format(JsonArray().apply { add(representative) }, query)[0].asJsonObject
-
+            val repCopy = representative.deepCopy()
             if (!hasImplicitGlobalHoisting) {
-                injectTraceAttributes(formattedRep, traceDocsMap[tId])
+                injectTraceAttributes(repCopy, traceDocsMap[tId])
             }
+            val formattedRep = formatter.format(JsonArray().apply { add(repCopy) }, query)[0].asJsonObject
 
             query.projections.forEach { proj ->
                 if (proj.function != null || proj.arithmeticExpression != null) {
@@ -520,13 +529,17 @@ class PqlQueryExecutor(
 
             query.orderBy.forEach { order ->
                 if (order.function != null || order.arithmeticExpression != null) {
-                    val dummyProj = pql.model.PqlProjection(scope = order.scope, attribute = order.attribute, raw = order.attribute,
-                        function = order.function, arithmeticExpression = order.arithmeticExpression)
-                    val value = evaluateGroupProjection(eventsInGroup, dummyProj, traceDocsMap[tId], logDocsMap[lId])
-                    val cleanKey = dummyProj.raw.replace(" ", "")
+                    val value = if (order.function is pql.model.PqlFunction.AggregationFunction) {
+                        evaluateAggregation(eventsInGroup, order.function, traceDocsMap[tId], logDocsMap[lId])
+                    } else if (order.arithmeticExpression != null) {
+                        evaluateMath(eventsInGroup, order.arithmeticExpression, traceDocsMap[tId], logDocsMap[lId])
+                    } else null
+
+                    val rawKey = order.attribute
+                    val cleanKey = rawKey.replace(" ", "")
 
                     if (value != null) {
-                        formattedRep.addProperty(dummyProj.raw, value.toString())
+                        formattedRep.addProperty(rawKey, value.toString())
                         formattedRep.addProperty(cleanKey, value.toString())
                     }
                 }
@@ -538,7 +551,6 @@ class PqlQueryExecutor(
             finalDocs.add(groupResult)
         }
 
-        // --- BRAKUJĄCE SORTOWANIE ZGRUPOWANYCH WYNIKÓW ---
         if (query.orderBy.isNotEmpty()) {
             finalDocs.sortWith(Comparator { a, b ->
                 var cmp = 0
@@ -558,7 +570,6 @@ class PqlQueryExecutor(
                     if (valA == null) valA = extractValueBySegments(repA, fieldMapper.resolve(order.scope, order.attribute).segments)
                     if (valB == null) valB = extractValueBySegments(repB, fieldMapper.resolve(order.scope, order.attribute).segments)
 
-                    // Konwertujemy tekstową notację naukową na liczby do bezpiecznego porównania matematycznego
                     val numA = valA?.toString()?.toDoubleOrNull()
                     val numB = valB?.toString()?.toDoubleOrNull()
 
@@ -575,7 +586,6 @@ class PqlQueryExecutor(
                 cmp
             })
         }
-        // --- KONIEC SORTOWANIA ---
 
         val sortedResult = JsonArray()
         var stream = finalDocs.asSequence()
@@ -586,10 +596,6 @@ class PqlQueryExecutor(
         return sortedResult
     }
 
-    /**
-     * Strategia grupowania wariantów (Process Mining).
-     * Wykorzystuje hoisting (^), aby tworzyć i grupować pełne sekwencje historyczne zdarzeń.
-     */
     private fun formatVariantGroupedResponse(docs: JsonArray, query: PqlQuery, hoistedGroupField: pql.model.PqlGroupByField): JsonArray {
         val attrName = hoistedGroupField.attribute.removePrefix("^").removePrefix("e:")
 
@@ -728,8 +734,10 @@ class PqlQueryExecutor(
         }
 
         val finalDocs = mutableListOf<JsonObject>()
-        traceGroups.forEach { (_, listOfTraces) ->
+        traceGroups.forEach { (sequenceKey, listOfTraces) ->
             val groupResult = JsonObject()
+
+            groupResult.addProperty(hoistedGroupField.attribute, sequenceKey)
             groupResult.addProperty("count", listOfTraces.size)
 
             if (outerSortRule != null && outerSortRule.attribute.contains("(")) {
@@ -775,9 +783,11 @@ class PqlQueryExecutor(
 
             val representativeEvents = JsonArray()
             listOfTraces.first().forEach { eventDoc ->
-                val formattedEvent = formatter.format(JsonArray().apply { add(eventDoc) }, query)[0].asJsonObject
-                val tId = eventDoc.get("traceId")?.asString
-                injectTraceAttributes(formattedEvent, traceDocsMap[tId])
+                val repCopy = eventDoc.deepCopy()
+                val tId = repCopy.get("traceId")?.asString
+                injectTraceAttributes(repCopy, traceDocsMap[tId])
+
+                val formattedEvent = formatter.format(JsonArray().apply { add(repCopy) }, query)[0].asJsonObject
                 representativeEvents.add(formattedEvent)
             }
             groupResult.add("events", representativeEvents)
@@ -812,9 +822,6 @@ class PqlQueryExecutor(
             ?: ""
     }
 
-    /**
-     * Rekursywnie wydobywa wartość z zagnieżdżonego obiektu JSON, używając listy segmentów.
-     */
     private fun extractValueBySegments(doc: JsonObject, segments: List<String>): Any? {
         var current: com.google.gson.JsonElement? = doc
         for (segment in segments) {
@@ -853,16 +860,68 @@ class PqlQueryExecutor(
         return a.toString().compareTo(b.toString())
     }
 
-    // --- SILNIK OBLICZENIOWY DLA GRUP (AGREGACJE I MATEMATYKA) ---
-
     private fun evaluateGroupProjection(events: List<JsonObject>, proj: pql.model.PqlProjection, traceDoc: JsonObject?, logDoc: JsonObject? = null): Any? {
-        if (proj.function is pql.model.PqlFunction.AggregationFunction) {
-            return evaluateAggregation(events, proj.function, traceDoc, logDoc)
+        if (proj.function != null) {
+            return evaluateFunction(events, proj.function, traceDoc, logDoc)
         }
         if (proj.arithmeticExpression != null) {
             return evaluateMath(events, proj.arithmeticExpression, traceDoc, logDoc)
         }
         return null
+    }
+
+    // Dodana funkcja ewaluująca funkcje skalarne i agregujące w locie
+    private fun evaluateFunction(events: List<JsonObject>, func: pql.model.PqlFunction, traceDoc: JsonObject?, logDoc: JsonObject? = null): Any? {
+        if (func is pql.model.PqlFunction.AggregationFunction) {
+            return evaluateAggregation(events, func, traceDoc, logDoc)
+        }
+        if (func is pql.model.PqlFunction.ScalarFunction1) {
+            // POPRAWKA NULL-SAFETY: Rozpakowanie typów na nie-nullowe
+            val scope = func.scope ?: PqlScope.EVENT
+            val attribute = func.attribute ?: return null
+
+            // Teraz fieldMapper dostaje gwarantowane X i String, a kompilator jest szczęśliwy
+            val segments = fieldMapper.resolve(scope, attribute).segments
+            val target = when (scope) {
+                PqlScope.LOG -> logDoc ?: events.firstOrNull()
+                PqlScope.TRACE -> traceDoc ?: events.firstOrNull()
+                else -> events.firstOrNull()
+            } ?: return null
+
+            val ext = extractValueBySegments(target, segments) ?: return null
+
+            val strVal = ext.toString()
+            return when (func.type) {
+                pql.model.PqlFunction.Scalar1.UPPER -> strVal.uppercase()
+                pql.model.PqlFunction.Scalar1.LOWER -> strVal.lowercase()
+                pql.model.PqlFunction.Scalar1.ROUND -> strVal.toDoubleOrNull()?.let { Math.round(it) }
+                pql.model.PqlFunction.Scalar1.YEAR -> parseDatePart(strVal, "year")
+                pql.model.PqlFunction.Scalar1.MONTH -> parseDatePart(strVal, "month")
+                pql.model.PqlFunction.Scalar1.DAY -> parseDatePart(strVal, "day")
+                pql.model.PqlFunction.Scalar1.DAYOFWEEK -> parseDatePart(strVal, "dayofweek")
+                else -> strVal
+            }
+        }
+        if (func is pql.model.PqlFunction.ScalarFunction0 && func.type == pql.model.PqlFunction.Scalar0.NOW) {
+            return java.time.OffsetDateTime.now().toString()
+        }
+        return null
+    }
+
+    // Helper do ekstrakcji składowych daty z formatu ISO
+    private fun parseDatePart(dateStr: String, part: String): Int? {
+        return try {
+            val dt = java.time.OffsetDateTime.parse(dateStr)
+            when (part) {
+                "year" -> dt.year
+                "month" -> dt.monthValue
+                "day" -> dt.dayOfMonth
+                "dayofweek" -> dt.dayOfWeek.value
+                else -> null
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun evaluateAggregation(events: List<JsonObject>, func: pql.model.PqlFunction.AggregationFunction, traceDoc: JsonObject?, logDoc: JsonObject? = null): Any? {
@@ -885,14 +944,12 @@ class PqlQueryExecutor(
 
         if (rawValues.isEmpty()) return null
 
-        // KRYTYCZNA POPRAWKA DLA FUNKCJI COUNT:
-        // Zliczamy elementy od razu, zanim algorytm odrzuci wartości tekstowe przy próbie
-        // rzutowania na Double (co powodowało puste wyniki dla count(tekst)).
         if (aggType.name == "COUNT") {
             return rawValues.size.toDouble()
         }
 
-        val isStringAgg = rawValues.any { it is String && it.toDoubleOrNull() == null } && (cleanAttribute.contains("name") || !cleanAttribute.contains("time"))
+        val isStringAgg = rawValues.any { it is String && it.toDoubleOrNull() == null } &&
+                (cleanAttribute.contains("name") || cleanAttribute.contains("time") || cleanAttribute.contains("timestamp") || cleanAttribute.contains("resource") || cleanAttribute.contains("transition"))
 
         if (isStringAgg && (aggType.name == "MIN" || aggType.name == "MAX")) {
             val strValues = rawValues.map { it.toString() }
@@ -926,16 +983,41 @@ class PqlQueryExecutor(
 
     private fun evaluateMath(events: List<JsonObject>, expr: pql.model.PqlArithmeticExpression, traceDoc: JsonObject?, logDoc: JsonObject? = null): Any? {
         return when (expr) {
-            is pql.model.PqlArithmeticExpression.Literal -> expr.value.toString().toDoubleOrNull()
-            is pql.model.PqlArithmeticExpression.Attribute -> null
+            is pql.model.PqlArithmeticExpression.Literal -> expr.value.toString().toDoubleOrNull() ?: expr.value.toString()
+            is pql.model.PqlArithmeticExpression.Attribute -> {
+                val segments = fieldMapper.resolve(expr.scope, expr.attribute).segments
+                val target = when (expr.scope) {
+                    PqlScope.LOG -> logDoc ?: events.firstOrNull()
+                    PqlScope.TRACE -> traceDoc ?: events.firstOrNull()
+                    else -> events.firstOrNull()
+                } ?: return null
+
+                val ext = extractValueBySegments(target, segments)
+                ext as? Double ?: ext?.toString()?.toDoubleOrNull() ?: ext
+            }
             is pql.model.PqlArithmeticExpression.FunctionCall -> {
-                if (expr.function is pql.model.PqlFunction.AggregationFunction) {
-                    evaluateAggregation(events, expr.function, traceDoc, logDoc)
-                } else null
+                evaluateFunction(events, expr.function, traceDoc, logDoc)
             }
             is pql.model.PqlArithmeticExpression.Binary -> {
                 val leftRaw = evaluateMath(events, expr.left, traceDoc, logDoc) ?: return null
                 val rightRaw = evaluateMath(events, expr.right, traceDoc, logDoc) ?: return null
+
+                // POPRAWKA: Łączenie stringów jeśli wywołano znak +
+                if (expr.operator == pql.model.ArithmeticOperator.ADD && (leftRaw is String || rightRaw is String)) {
+                    return leftRaw.toString() + rightRaw.toString()
+                }
+
+                // POPRAWKA: Wsparcie dla odejmowania na formacie czasu
+                if (expr.operator == pql.model.ArithmeticOperator.SUB && leftRaw is String && rightRaw is String) {
+                    try {
+                        val dt1 = java.time.OffsetDateTime.parse(leftRaw).toInstant().toEpochMilli()
+                        val dt2 = java.time.OffsetDateTime.parse(rightRaw).toInstant().toEpochMilli()
+                        return (dt1 - dt2).toDouble() / (1000 * 60 * 60 * 24) // różnica zwrócona w dniach tak jak domyślnie PQL 0.4
+                    } catch (e: Exception) {
+                        // fallback jeśli to nie jest poprawna data
+                    }
+                }
+
                 val leftVal = leftRaw as? Double ?: leftRaw.toString().toDoubleOrNull() ?: return null
                 val rightVal = rightRaw as? Double ?: rightRaw.toString().toDoubleOrNull() ?: return null
 
