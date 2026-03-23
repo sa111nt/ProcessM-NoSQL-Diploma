@@ -1,13 +1,16 @@
 package model
 
+import java.util.UUID
+
 /**
  * Reprezentuje pojedyncze zdarzenie (Event) w logu procesowym.
  * Jest to podstawowy element danych w XES/OCEL.
+ * Zgodnie ze standardem XES, identity:id musi być typu UUID.
  */
 data class Event(
-    val id: String,
+    val id: UUID,
 
-    val traceId: String? = null,
+    val traceId: UUID? = null,
 
     val name: String? = null,
 

@@ -34,8 +34,6 @@ object LogImporter {
         val type = LogFileDetector.detect(file)
 
         // LOGIKA ZASOBÓW:
-        // Jeśli otrzymaliśmy manager z zewnątrz (np. z Main.kt), używamy go.
-        // Jeśli nie, tworzymy własny tymczasowy.
         val couch = providedManager ?: CouchDBManager()
         val shouldCloseManager = providedManager == null
 
@@ -58,7 +56,6 @@ object LogImporter {
                         while (entry != null) {
                             if (!entry.isDirectory && entry.name.endsWith(".xes", ignoreCase = true)) {
                                 println("[INFO] Found XES inside ZIP: ${entry.name}")
-                                // Przekazujemy strumień ZIP bez zamykania go tutaj (zamknie go blok use)
                                 importStream(zipStream, couch, targetDbName)
                             }
                             entry = zipStream.nextEntry
@@ -71,8 +68,6 @@ object LogImporter {
             e.printStackTrace()
             println("[ERROR] Import failed: ${e.message}")
         } finally {
-            // Zamykamy manager TYLKO wtedy, gdy sami go stworzyliśmy.
-            // Jeśli przyszedł z zewnątrz, niech właściciel (Main) decyduje kiedy go zamknąć.
             if (shouldCloseManager) {
                 couch.close()
             }
@@ -83,14 +78,33 @@ object LogImporter {
     }
 
     private fun importStream(inputStream: InputStream, couch: CouchDBManager, dbName: String) {
-        // WAŻNE: Nie zamykamy inputStream tutaj, bo może to być ZipInputStream, który ma kolejne wpisy!
-        // XMLInputFactory stworzy reader, który "pożycza" strumień.
         val xmlReader = XMLInputFactory.newDefaultFactory().createXMLStreamReader(inputStream)
         val parser = StaxXesParser(xmlReader)
 
-        // Używamy przekazanej nazwy bazy (dbName) zamiast sztywnego "event_logs"
-        val mapper = StreamingXesToCouchDBMapper(couch, dbName, batchSize = 100, parallelism = 6)
-
+        val mapper = StreamingXesToCouchDBMapper(couch, dbName, parallelism = 6)
         mapper.map(parser)
+
+        // --- OPTYMALIZACJA NOSQL (TWORZENIE INDEKSÓW) ---
+        // Po udanym wgraniu dokumentów zmuszamy bazę do utworzenia struktur B-Tree (indeksów).
+        // Dzięki temu zapytania PQL oraz Orkiestrator N+1 będą działać w ułamku sekundy,
+        // eliminując konieczność skanowania całej bazy (tzw. Full Collection Scan).
+        println("[INFO] Building database indexes for optimal query performance...")
+
+        // Indeks do błyskawicznego odróżniania Eventów od Logów/Trace'ów
+        couch.ensureIndex(dbName, listOf("docType"))
+        // Indeks KLUCZOWY dla trybu N+1 (pobieranie Śladów na podstawie Logu)
+        couch.ensureIndex(dbName, listOf("logId"))
+        // Indeks KLUCZOWY dla trybu N+1 (pobieranie Zdarzeń na podstawie Śladu)
+        couch.ensureIndex(dbName, listOf("traceId"))
+        // Indeks dla najczęstszego atrybutu domenowego (PQL where e:name = ...)
+        couch.ensureIndex(dbName, listOf("activity"))
+        // Indeks ułatwiający sortowanie czasowe
+        couch.ensureIndex(dbName, listOf("timestamp"))
+
+        // NOWE: Błyskawiczne wyszukiwanie po ORYGINALNYM ID z pliku XES (Rozwiązanie Problemu 7)
+        couch.ensureIndex(dbName, listOf("identity:id"))
+        couch.ensureIndex(dbName, listOf("log_attributes.identity:id"))
+
+        println("[INFO] Indexes successfully created or verified!")
     }
 }

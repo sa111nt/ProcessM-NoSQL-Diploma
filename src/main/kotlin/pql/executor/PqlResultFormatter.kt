@@ -6,33 +6,30 @@ import com.google.gson.JsonObject
 import pql.model.PqlProjection
 import pql.model.PqlQuery
 import pql.model.PqlScope
+import pql.model.PqlStandardAttributes
 import pql.translator.PqlFieldMapper
 
-/**
- * Formatuje surowe dokumenty z CouchDB na wynik zapytania PQL.
- * Zachowuje oryginalne przestrzenie nazw (e:, t:, l:), aby uniknąć kolizji
- * kluczy przy zapytaniach Cross-Scope (np. t:concept:name vs e:concept:name).
- */
 class PqlResultFormatter(private val fieldMapper: PqlFieldMapper) {
 
     fun format(rawDocs: JsonArray, query: PqlQuery): JsonArray {
         val result = JsonArray()
-
         for (element in rawDocs) {
             if (!element.isJsonObject) continue
             val doc = element.asJsonObject
-
             val formatted = formatDocument(doc, query)
             result.add(formatted)
         }
-
         return result
     }
 
     private fun formatDocument(doc: JsonObject, query: PqlQuery): JsonObject {
         val result = JsonObject()
 
-        if (query.selectAll) {
+        doc.get("logId")?.let { result.add("logId", it) }
+        doc.get("traceId")?.let { result.add("traceId", it) }
+        doc.get("_id")?.let { result.add("_id", it) }
+
+        if (query.selectAll || query.projections.isEmpty()) {
             val allFields = getAllFields(doc, query.collection)
             for ((pqlName, value) in allFields) {
                 result.add(pqlName, value)
@@ -40,8 +37,27 @@ class PqlResultFormatter(private val fieldMapper: PqlFieldMapper) {
             return result
         }
 
+        // --- CZYSTA ARCHITEKTURA: Podejście Dwóch Przejść (Two-Pass Approach) ---
+        // Gwarantuje zachowanie kolejności kluczy JSON względem zapytania SELECT,
+        // ale skutecznie odrzuca zduplikowane klasyfikatory w locie.
+
+        val activeBaseAttributes = mutableSetOf<String>()
+
+        for (proj in query.projections) {
+            if (proj.arithmeticExpression != null || proj.function != null) continue
+            val scope = proj.scope ?: query.collection
+            val attr = proj.attribute ?: continue
+            val resolvedAttr = PqlStandardAttributes.resolve(scope, attr).removePrefix("^^").removePrefix("^").removePrefix("[").removeSuffix("]")
+            val isClassifier = resolvedAttr.startsWith("classifier:") || resolvedAttr.startsWith("c:") || resolvedAttr.startsWith("e:c:") || resolvedAttr.startsWith("t:c:") || resolvedAttr.startsWith("l:c:")
+
+            if (!isClassifier) {
+                activeBaseAttributes.add("${scope.name}_${fieldMapper.getStandardName(resolvedAttr)}")
+            }
+        }
+
+        val processedBases = mutableSetOf<String>()
+
         for (projection in query.projections) {
-            // Wartości wyliczone w pamięci (arytmetyka/agregacje)
             if (projection.arithmeticExpression != null || projection.function != null) {
                 val rawKey = projection.raw
                 val cleanKey = projection.raw.replace(" ", "")
@@ -49,7 +65,11 @@ class PqlResultFormatter(private val fieldMapper: PqlFieldMapper) {
                 val computedValue = doc.get(rawKey) ?: doc.get(cleanKey)
                 if (computedValue != null) {
                     val aliasName = projection.alias ?: rawKey
-                    result.add(aliasName, computedValue)
+                    if (aliasName.lowercase().contains("count") && computedValue.isJsonPrimitive && computedValue.asJsonPrimitive.isNumber) {
+                        result.addProperty(aliasName, computedValue.asDouble.toLong())
+                    } else {
+                        result.add(aliasName, computedValue)
+                    }
                 }
                 continue
             }
@@ -65,94 +85,119 @@ class PqlResultFormatter(private val fieldMapper: PqlFieldMapper) {
                 continue
             }
 
+            val resolvedAttr = PqlStandardAttributes.resolve(scope, attribute)
+            val cleanAttrOriginal = resolvedAttr.removePrefix("^^").removePrefix("^").removePrefix("[").removeSuffix("]")
+
+            val isClassifier = cleanAttrOriginal.startsWith("classifier:") || cleanAttrOriginal.startsWith("c:") || cleanAttrOriginal.startsWith("e:c:") || cleanAttrOriginal.startsWith("t:c:") || cleanAttrOriginal.startsWith("l:c:")
+
+            val baseAttributes = if (isClassifier) {
+                val base = cleanAttrOriginal.substringAfterLast(":")
+                fieldMapper.getImplicitClassifierMapping(base)
+            } else {
+                listOf(cleanAttrOriginal)
+            }
+
+            var isDuplicate = false
+            if (isClassifier) {
+                isDuplicate = baseAttributes.any {
+                    val mapped = "${scope.name}_${fieldMapper.getStandardName(it)}"
+                    activeBaseAttributes.contains(mapped) || processedBases.contains(mapped)
+                }
+            } else {
+                isDuplicate = baseAttributes.any {
+                    val mapped = "${scope.name}_${fieldMapper.getStandardName(it)}"
+                    processedBases.contains(mapped)
+                }
+            }
+
+            val pqlName = projection.alias ?: projection.raw
+
+            // CZYSTA DEDUPLIKACJA BEZ HACKÓW
+            if (isDuplicate) {
+                continue
+            }
+
+            baseAttributes.forEach { processedBases.add("${scope.name}_${fieldMapper.getStandardName(it)}") }
+
             val value = extractValue(doc, scope, attribute)
-            val pqlName = projection.alias ?: buildPqlFieldName(scope, attribute)
 
             if (value != null) {
-                result.add(pqlName, value)
+                addValueToResult(result, pqlName, value)
             } else if (scope == PqlScope.TRACE && (attribute == "name" || attribute == "concept:name")) {
-                doc.get("traceId")?.let { result.add(pqlName, it) }
+                doc.get("traceId")?.let { result.addProperty(pqlName, it.asString.substringAfterLast("_")) }
             }
         }
-
-        // Sprawdzamy, czy w zapytaniu były wyłącznie agregacje/działania.
-        val hasAggregationsOnly = query.projections.isNotEmpty() && query.projections.all { it.function != null || it.arithmeticExpression != null }
-
-        // Poprawka dla Process Mining (Zapobieganie pustym reprezentacjom {})
-        if (result.entrySet().isEmpty() && !hasAggregationsOnly) {
-            extractValue(doc, PqlScope.EVENT, "concept:name")?.let { result.add("e:concept:name", it) }
-            extractValue(doc, PqlScope.EVENT, "time:timestamp")?.let { result.add("e:time:timestamp", it) }
-        }
-
-        // BEZPIECZNIK NOSQL (Przeniesiony z testów do Core'a):
-        // Jeśli zapytanie powinno zwrócić dane powiązane ze śladem, ale atrybut t:name zniknął
-        // (np. przez dynamikę grupowania MangoDB), silnik odzyska go z surowego dokumentu
-        // i umieści w ładunku dla końcowego użytkownika.
-        if (!result.has("t:name") && !hasAggregationsOnly) {
-            val traceName = doc.get("traceId")?.asString
-                ?: doc.get("t:concept:name")?.asString
-                ?: Regex("log_[a-f0-9\\-]+_\\-?\\d+").find(doc.toString())?.value
-
-            if (traceName != null) {
-                result.addProperty("t:name", traceName)
-            }
-        }
-
         return result
     }
 
-    fun extractValue(doc: JsonObject, scope: PqlScope, attribute: String): JsonElement? {
-        val fieldPath = fieldMapper.resolve(scope, attribute)
-        val segments = fieldPath.segments
+    private fun addValueToResult(result: JsonObject, pqlName: String, value: JsonElement) {
+        if (pqlName.lowercase().contains("count") && value.isJsonPrimitive && value.asJsonPrimitive.isNumber) {
+            result.addProperty(pqlName, value.asDouble.toLong())
+        } else if (value.isJsonPrimitive) {
+            val prim = value.asJsonPrimitive
+            if (prim.isNumber) {
+                val num = prim.asNumber
+                if (num.toDouble() % 1.0 == 0.0) {
+                    result.addProperty(pqlName, num.toLong())
+                } else {
+                    result.addProperty(pqlName, num.toDouble())
+                }
+            }
+            else if (prim.isBoolean) result.addProperty(pqlName, prim.asBoolean)
+            else result.addProperty(pqlName, prim.asString)
+        } else {
+            result.add(pqlName, value)
+        }
+    }
 
-        var current: JsonElement = doc
-        for (segment in segments) {
-            if (current.isJsonObject && current.asJsonObject.has(segment)) {
-                current = current.asJsonObject.get(segment)
-            } else {
-                return null
+    fun extractValue(doc: JsonObject, scope: PqlScope, attribute: String): JsonElement? {
+        val resolvedAttr = PqlStandardAttributes.resolve(scope, attribute)
+        val cleanAttr = resolvedAttr.removePrefix("^^").removePrefix("^").removePrefix("[").removeSuffix("]")
+        val prefix = when(scope) { PqlScope.LOG -> "l:"; PqlScope.TRACE -> "t:"; PqlScope.EVENT -> "e:" }
+
+        val mappedAttr = fieldMapper.getStandardName(cleanAttr)
+
+        if (doc.has("$prefix$cleanAttr")) return doc.get("$prefix$cleanAttr")
+        if (doc.has("$prefix$mappedAttr")) return doc.get("$prefix$mappedAttr")
+        if (doc.has(cleanAttr)) return doc.get(cleanAttr)
+        if (doc.has(mappedAttr)) return doc.get(mappedAttr)
+
+        val rawVal = PqlQueryExecutor.extractRobustValue(doc, scope, cleanAttr)
+        if (rawVal != null) {
+            return when (rawVal) {
+                is JsonElement -> rawVal
+                is Number -> com.google.gson.JsonPrimitive(rawVal)
+                is Boolean -> com.google.gson.JsonPrimitive(rawVal)
+                else -> com.google.gson.JsonPrimitive(rawVal.toString())
             }
         }
 
-        return current
-    }
-
-    private fun buildPqlFieldName(scope: PqlScope, attribute: String): String {
-        val prefix = when (scope) {
-            PqlScope.LOG -> "l"
-            PqlScope.TRACE -> "t"
-            PqlScope.EVENT -> "e"
+        val targetContainer = if (scope == PqlScope.LOG) doc.getAsJsonObject("log_attributes") ?: doc.getAsJsonObject("xes_attributes") else doc.getAsJsonObject("xes_attributes")
+        if (targetContainer != null) {
+            if (targetContainer.has(cleanAttr)) return targetContainer.get(cleanAttr)
+            if (targetContainer.has(mappedAttr)) return targetContainer.get(mappedAttr)
         }
-        return "$prefix:$attribute"
+
+        return null
     }
 
     private fun getAllFields(doc: JsonObject, scope: PqlScope): Map<String, JsonElement> {
         val fields = mutableMapOf<String, JsonElement>()
 
-        when (scope) {
-            PqlScope.EVENT -> {
-                doc.get("activity")?.let { fields["e:concept:name"] = it }
-                doc.get("timestamp")?.let { fields["e:time:timestamp"] = it }
+        doc.get("activity")?.let { fields["e:concept:name"] = it }
+        doc.get("timestamp")?.let { fields["e:time:timestamp"] = it }
+        doc.get("identity:id")?.let { fields["e:identity:id"] = it }
 
-                doc.getAsJsonObject("xes_attributes")?.entrySet()?.forEach { (key, value) ->
-                    fields["e:$key"] = value
-                }
-            }
-            PqlScope.TRACE -> {
-                doc.get("originalTraceId")?.let { fields["t:concept:name"] = it }
+        doc.getAsJsonObject("xes_attributes")?.entrySet()?.forEach { fields["e:${it.key}"] = it.value }
 
-                doc.getAsJsonObject("xes_attributes")?.entrySet()?.forEach { (key, value) ->
-                    fields["t:$key"] = value
-                }
-            }
-            PqlScope.LOG -> {
-                doc.get("source")?.let { fields["l:source"] = it }
-
-                doc.getAsJsonObject("log_attributes")?.entrySet()?.forEach { (key, value) ->
-                    fields["l:$key"] = value
-                }
+        doc.entrySet().forEach { (k, v) ->
+            if (k.startsWith("l:") || k.startsWith("t:") || k.startsWith("e:")) {
+                fields[k] = v
             }
         }
+
+        val logAttrs = doc.getAsJsonObject("log_attributes")
+        logAttrs?.entrySet()?.forEach { fields["l:${it.key}"] = it.value }
 
         return fields
     }

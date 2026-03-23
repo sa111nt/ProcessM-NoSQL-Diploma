@@ -85,7 +85,6 @@ logic_expr  : '(' logic_expr ')'
             | OP_NOT logic_expr
             | logic_expr OP_AND logic_expr
             | logic_expr OP_OR logic_expr
-            | arith_expr
             ;
 
 in_list     : '(' id_or_scalar_list ')' ;

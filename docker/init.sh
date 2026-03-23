@@ -32,7 +32,7 @@ curl -X PUT $COUCH_URL/_global_changes || true
 echo "🚀 Applying AGGRESSIVE performance tuning..."
 
 # --- SEKJA OPTYMALIZACJI (TUNING) ---
-# To tutaj dzieje się magia przyspieszająca import z minut do sekund.
+# To tutaj dzieje się magia przystosowująca bazę do Big Data.
 
 # 1. Delayed Commits (Opóźniony zapis)
 # Domyślnie: false (CouchDB zapisuje na dysk po każdym requescie - bezpieczne, ale wolne).
@@ -45,7 +45,12 @@ curl -X PUT $COUCH_URL/_node/_local/_config/couchdb/delayed_commits -d '"true"'
 # Ustawiamy na ~4GB (4294967296 bajtów), żeby uniknąć błędu "413 Request Entity Too Large".
 curl -X PUT $COUCH_URL/_node/_local/_config/httpd/max_http_request_size -d '"4294967296"'
 
-# 3. Zmniejszenie poziomu logowania
+# 3. Zwiększenie maksymalnego rozmiaru POJEDYNCZEGO dokumentu (max_document_size)
+# Domyślnie: 8 MB (8000000 bajtów). Baza odrzucała gigantyczne nagłówki logów (np. Hospital_log 8.5MB).
+# Zmiana na: 50 MB (50000000 bajtów). Pozwala na zapisywanie potężnych drzew XES bez odcinania metadanych.
+curl -X PUT $COUCH_URL/_node/_local/_config/couchdb/max_document_size -d '"50000000"'
+
+# 4. Zmniejszenie poziomu logowania
 # Domyślnie: "info" (loguje każde zapytanie HTTP).
 # Zmiana na "warn": Loguje tylko błędy i ostrzeżenia.
 # ZYSK: Procesor nie traci czasu na wypisywanie tekstu do konsoli/pliku, a Docker nie puchnie od logów.
@@ -53,13 +58,13 @@ curl -X PUT $COUCH_URL/_node/_local/_config/log/level -d '"warn"'
 
 # --- USTAWIENIA KLASTRA (Dla jednego węzła) ---
 
-# 4. Liczba replik (n)
+# 5. Liczba replik (n)
 # Domyślnie: 3 (CouchDB próbuje trzymać 3 kopie każdego dokumentu dla bezpieczeństwa).
 # Zmiana na "1": Mamy tylko jeden serwer (kontener), więc 3 kopie to strata miejsca i CPU.
 # ZYSK: 3x mniej operacji zapisu dla procesora.
 curl -X PUT $COUCH_URL/_node/_local/_config/cluster/n -d '"1"'
 
-# 5. Liczba shardów (q)
+# 6. Liczba shardów (q)
 # Shardy to kawałki, na które dzielona jest baza. Pozwala to na wielowątkowość.
 # Ustawienie "4" jest optymalne dla procesorów 4-8 rdzeniowych.
 # Zbyt mało (1) = nie wykorzystasz wszystkich rdzeni. Zbyt dużo (16) = narzut na zarządzanie.

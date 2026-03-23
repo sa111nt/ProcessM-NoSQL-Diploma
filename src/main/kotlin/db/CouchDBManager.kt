@@ -11,17 +11,14 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 open class CouchDBManager(
-    // 1. Czysty URL bez loginu/hasła
     private val url: String = "http://127.0.0.1:5984",
     private val user: String = "admin",
-    // 2. POPRAWKA: Hasło zgodne z docker-compose.yml
     private val password: String = "admin"
 ) {
     private val maxConcurrency = 10
     private val gson = Gson()
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
-    // 3. Generujemy nagłówek Basic Auth raz
     private val authHeader = Credentials.basic(user, password)
     private val ensuredIndexes = mutableSetOf<String>()
 
@@ -36,58 +33,45 @@ open class CouchDBManager(
         .readTimeout(120, TimeUnit.SECONDS)
         .build()
 
-    /**
-     * Tworzy nową bazę danych.
-     */
     open fun createDb(dbName: String) {
         val emptyBody = "".toRequestBody(null)
         val request = Request.Builder()
             .put(emptyBody)
             .url("$url/$dbName")
-            .header("Authorization", authHeader) // Zawsze dodajemy nagłówek
+            .header("Authorization", authHeader)
             .build()
 
         try {
             client.newCall(request).execute().use { response ->
-                // 412 = Precondition Failed (Baza już istnieje) - to nie jest błąd
                 if (!response.isSuccessful && response.code != 412) {
-                    throw IOException("Błąd tworzenia bazy '$dbName'. Kod: ${response.code} (${response.message})")
+                    throw IOException("Błąd tworzenia bazy '$dbName'. Kod: ${response.code}")
                 }
             }
         } catch (e: Exception) {
-            throw IOException("Nie udało się połączyć z CouchDB ($url). Sprawdź czy kontener działa.", e)
+            throw IOException("Nie udało się połączyć z CouchDB ($url).", e)
         }
     }
 
-    /**
-     * Usuwa bazę danych o podanej nazwie.
-     */
     open fun deleteDb(dbName: String) {
         val request = Request.Builder()
-            .delete() // Używamy metody HTTP DELETE
+            .delete()
             .url("$url/$dbName")
-            .header("Authorization", authHeader) // Wymagana autoryzacja
+            .header("Authorization", authHeader)
             .build()
 
         try {
             client.newCall(request).execute().use { response ->
-                // Jeśli kod to 404 (Not Found), to znaczy, że bazy i tak już nie było,
-                // więc cel (brak bazy) został osiągnięty - nie rzucamy błędu.
                 if (!response.isSuccessful && response.code != 404) {
-                    throw IOException("Błąd usuwania bazy '$dbName'. Kod: ${response.code} (${response.message})")
+                    throw IOException("Błąd usuwania bazy '$dbName'. Kod: ${response.code}")
                 }
             }
         } catch (e: Exception) {
-            throw IOException("Nie udało się połączyć z CouchDB ($url) podczas próby usunięcia bazy.", e)
+            throw IOException("Nie udało się połączyć podczas próby usunięcia bazy.", e)
         }
     }
 
-    /**
-     * Wstawia dokumenty w trybie Batch.
-     */
     open fun insertBulkDocsRaw(dbName: String, jsonBytes: ByteArray) {
         val requestBody = jsonBytes.toRequestBody(JSON_MEDIA_TYPE)
-
         val request = Request.Builder()
             .post(requestBody)
             .url("$url/$dbName/_bulk_docs")
@@ -95,18 +79,20 @@ open class CouchDBManager(
             .build()
 
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("Błąd zapisu batcha: ${response.code} ${response.message}")
-            }
+            if (!response.isSuccessful) throw IOException("Błąd zapisu batcha: ${response.code}")
         }
     }
 
-    /**
-     * Wykonuje zapytanie Mango (JSON selector).
-     */
+    // Klasyczne pobieranie (zwraca JsonArray - używać tylko dla małych wyników)
     open fun findDocs(dbName: String, mangoQuery: JsonObject): JsonArray {
-        val requestBody = gson.toJson(mangoQuery).toRequestBody(JSON_MEDIA_TYPE)
+        val result = JsonArray()
+        findDocsStream(dbName, mangoQuery) { doc -> result.add(doc) }
+        return result
+    }
 
+    // 💡 ZŁOTA OPTYMALIZACJA OOM: Strumieniowe czytanie i parsowanie w locie! (Bez budowania wielkich tekstów)
+    open fun findDocsStream(dbName: String, mangoQuery: JsonObject, onDocParsed: (JsonObject) -> Unit) {
+        val requestBody = gson.toJson(mangoQuery).toRequestBody(JSON_MEDIA_TYPE)
         val request = Request.Builder()
             .post(requestBody)
             .url("$url/$dbName/_find")
@@ -114,24 +100,30 @@ open class CouchDBManager(
             .build()
 
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("Błąd zapytania _find: ${response.code} ${response.message}")
-            }
+            if (!response.isSuccessful) throw IOException("Błąd zapytania _find: ${response.code}")
 
-            val responseString = response.body?.string() ?: "{}"
-            val root = JsonParser.parseString(responseString).asJsonObject
-
-            return if (root.has("docs")) {
-                root.getAsJsonArray("docs")
-            } else {
-                JsonArray()
+            val reader = com.google.gson.stream.JsonReader(response.body!!.charStream())
+            try {
+                reader.beginObject()
+                while (reader.hasNext()) {
+                    if (reader.nextName() == "docs") {
+                        reader.beginArray()
+                        while (reader.hasNext()) {
+                            val doc = JsonParser.parseReader(reader).asJsonObject
+                            onDocParsed(doc)
+                        }
+                        reader.endArray()
+                    } else {
+                        reader.skipValue()
+                    }
+                }
+                reader.endObject()
+            } catch (e: Exception) {
+                println("[ERROR] Błąd strumieniowania JSON z bazy: ${e.message}")
             }
         }
     }
 
-    /**
-     * Tworzy indeks dla przyspieszenia zapytań.
-     */
     open fun ensureIndex(dbName: String, fields: List<String>) {
         if (fields.isEmpty()) return
         val signature = "$dbName:${fields.joinToString(",")}"
@@ -161,19 +153,11 @@ open class CouchDBManager(
         }
     }
 
-    /**
-     * Usuwa dokumenty pasujące do zapytania.
-     */
     open fun deleteDocs(dbName: String, query: JsonObject): Int {
         if (!query.has("fields")) {
-            query.add("fields", JsonArray().apply {
-                add("_id")
-                add("_rev")
-            })
+            query.add("fields", JsonArray().apply { add("_id"); add("_rev") })
         }
-        if (!query.has("limit")) {
-            query.addProperty("limit", 100000)
-        }
+        if (!query.has("limit")) query.addProperty("limit", 100000)
 
         val docsToDelete = findDocs(dbName, query)
         if (docsToDelete.isEmpty) return 0
@@ -200,9 +184,8 @@ open class CouchDBManager(
 
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) error("❌ Błąd usuwania: ${response.code}")
-
-            val respString = response.body?.string() ?: "[]"
-            val respArray = JsonParser.parseString(respString).asJsonArray
+            val reader = response.body?.charStream() ?: return 0
+            val respArray = JsonParser.parseReader(reader).asJsonArray
             return respArray.count { !it.asJsonObject.has("error") }
         }
     }

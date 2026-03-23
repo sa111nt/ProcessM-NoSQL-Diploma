@@ -111,20 +111,16 @@ class PqlToCouchDbTranslator(
                                 collectionScope
                             )
                         }
-                        PqlOperator.LIKE -> {
-                            val dotPath = fieldMapper.resolve(inner.scope, inner.attribute).toDotPath()
-                            val pattern = inner.value as? String ?: error("LIKE operator requires a string pattern")
-                            val regexPattern = pattern
-                                .replace(".", "\\.")
-                                .replace("%", ".*")
-                                .replace("_", ".")
-
-                            val likeCondition = JsonObject()
-                            likeCondition.add(dotPath, JsonObject().apply { addProperty("\$regex", regexPattern) })
-
+                        PqlOperator.IN -> {
+                            translateSimpleCondition(
+                                PqlCondition.Simple(inner.scope, inner.attribute, PqlOperator.NOT_IN, inner.value),
+                                collectionScope
+                            )
+                        }
+                        PqlOperator.LIKE, PqlOperator.MATCHES -> {
                             JsonObject().apply {
                                 add("\$nor", JsonArray().apply {
-                                    add(likeCondition)
+                                    add(translateSimpleCondition(inner, collectionScope))
                                 })
                             }
                         }
@@ -152,38 +148,93 @@ class PqlToCouchDbTranslator(
         condition: PqlCondition.Simple,
         collectionScope: PqlScope
     ): JsonObject {
-        var dotPath = fieldMapper.resolve(condition.scope, condition.attribute).toDotPath()
+        // Zdejmujemy nawiasy klamrowe (escape) wstrzyknięte przez ucieczkę ANTLR
+        val rawAttr = condition.attribute.removePrefix("[").removeSuffix("]")
+        val cleanAttr = rawAttr.removePrefix("e:").removePrefix("t:").removePrefix("l:")
+        val attrLower = cleanAttr.lowercase()
 
-        // 🚨 NAPRAWA BŁĘDU MAPOWANIA KLUCZY OBCYCH 🚨
-        // Jeśli szukamy w Eventach, a ktoś prosi o l:id, musimy szukać po "logId", a nie po "_id" eventu!
-        val attrLower = condition.attribute.lowercase()
-        if (condition.scope != collectionScope && (attrLower == "id" || attrLower == "_id")) {
-            if (condition.scope == PqlScope.LOG) {
-                dotPath = "logId"
-            } else if (condition.scope == PqlScope.TRACE) {
-                dotPath = "traceId"
+        var dotPath = fieldMapper.resolve(condition.scope, cleanAttr).toDotPath()
+
+        // 🚨 ODBUDOWA ŚCIEŻEK DLA PŁASKIEJ BAZY NOSQL 🚨
+        if (attrLower == "id" || attrLower == "_id" || attrLower == "identity:id") {
+            dotPath = if (condition.scope == collectionScope) "_id"
+            else if (condition.scope == PqlScope.LOG) "logId"
+            else if (condition.scope == PqlScope.TRACE) "traceId"
+            else "_id"
+        } else if (attrLower == "concept:name" || attrLower == "name") {
+            dotPath = when (condition.scope) {
+                PqlScope.EVENT -> "activity"
+                PqlScope.TRACE -> "xes_attributes.concept:name"
+                PqlScope.LOG -> "log_attributes.concept:name"
             }
+        } else if (attrLower == "time:timestamp" || attrLower == "timestamp") {
+            dotPath = when (condition.scope) {
+                PqlScope.EVENT -> "timestamp"
+                PqlScope.TRACE -> "xes_attributes.time:timestamp"
+                PqlScope.LOG -> "log_attributes.time:timestamp"
+            }
+        } else if (cleanAttr.count { it == ':' } > 0 || attrLower.contains("meta_")) {
+            // Omijamy destrukcyjne działanie fieldMappera na zagnieżdżonych, spłaszczonych kluczach ZACHOWUJĄC WIELKOŚĆ LITER
+            dotPath = when (condition.scope) {
+                PqlScope.LOG -> "log_attributes.$cleanAttr"
+                PqlScope.TRACE -> "xes_attributes.$cleanAttr"
+                PqlScope.EVENT -> "xes_attributes.$cleanAttr"
+            }
+        } else if (condition.scope != collectionScope) {
+            val scopePrefix = when (condition.scope) { PqlScope.EVENT -> "e:"; PqlScope.TRACE -> "t:"; PqlScope.LOG -> "l:" }
+            dotPath = scopePrefix + cleanAttr
         }
 
         val conditionObject = JsonObject()
 
+        val strVal = condition.value as? String
+        val numVal = strVal?.toDoubleOrNull()
+
         when (condition.operator) {
-            PqlOperator.EQ -> conditionObject.add("\$eq", convertValue(condition.value))
-            PqlOperator.NEQ -> conditionObject.add("\$ne", convertValue(condition.value))
-            PqlOperator.LT -> conditionObject.add("\$lt", convertValue(condition.value))
-            PqlOperator.LE -> conditionObject.add("\$lte", convertValue(condition.value))
-            PqlOperator.GT -> conditionObject.add("\$gt", convertValue(condition.value))
-            PqlOperator.GE -> conditionObject.add("\$gte", convertValue(condition.value))
+            PqlOperator.EQ -> {
+                if (numVal != null) {
+                    conditionObject.add("\$in", JsonArray().apply {
+                        add(strVal)
+                        add(if (numVal % 1.0 == 0.0) numVal.toLong() else numVal)
+                    })
+                } else {
+                    conditionObject.add("\$eq", convertValue(condition.value))
+                }
+            }
+            PqlOperator.NEQ -> {
+                if (numVal != null) {
+                    conditionObject.add("\$nin", JsonArray().apply {
+                        add(strVal)
+                        add(if (numVal % 1.0 == 0.0) numVal.toLong() else numVal)
+                    })
+                } else {
+                    conditionObject.add("\$ne", convertValue(condition.value))
+                }
+            }
+            PqlOperator.LT -> conditionObject.add("\$lt", convertValue(numVal ?: condition.value))
+            PqlOperator.LE -> conditionObject.add("\$lte", convertValue(numVal ?: condition.value))
+            PqlOperator.GT -> conditionObject.add("\$gt", convertValue(numVal ?: condition.value))
+            PqlOperator.GE -> conditionObject.add("\$gte", convertValue(numVal ?: condition.value))
             PqlOperator.IN -> {
                 val values = condition.value as? List<*> ?: error("IN operator requires a list of values")
                 conditionObject.add("\$in", JsonArray().apply {
-                    values.forEach { add(convertValue(it)) }
+                    values.forEach {
+                        val vStr = it as? String
+                        val vNum = vStr?.toDoubleOrNull()
+                        add(convertValue(it))
+                        if (vNum != null) add(convertValue(if (vNum % 1.0 == 0.0) vNum.toLong() else vNum))
+                    }
                 })
             }
             PqlOperator.NOT_IN -> {
                 val values = condition.value as? List<*> ?: error("NOT IN operator requires a list of values")
                 conditionObject.add("\$nin", JsonArray().apply {
-                    values.forEach { add(convertValue(it)) }
+                    values.forEach {
+                        val vStr = it as? String
+                        val vNum = vStr?.toDoubleOrNull()
+                        add(convertValue(it))
+                        if (vNum != null) add(convertValue(if (vNum % 1.0 == 0.0) vNum.toLong() else vNum))
+                    }
                 })
             }
             PqlOperator.LIKE -> {
@@ -215,7 +266,7 @@ class PqlToCouchDbTranslator(
                     else -> com.google.gson.JsonPrimitive(value)
                 }
             }
-            is Number -> com.google.gson.JsonPrimitive(value.toString())
+            is Number -> com.google.gson.JsonPrimitive(value)
             is Boolean -> com.google.gson.JsonPrimitive(value)
             is List<*> -> {
                 JsonArray().apply {

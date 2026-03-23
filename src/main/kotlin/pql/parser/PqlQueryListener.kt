@@ -4,23 +4,22 @@ import pql.model.*
 import ql.QLParser
 import ql.QLParserBaseListener
 
-/**
- * Listener that processes the ANTLR parse tree and builds the PqlQuery model.
- * It traverses the tree triggered by the parser and extracts clauses,
- * fields, functions, and scopes.
- */
 class PqlQueryListener : QLParserBaseListener() {
 
     private var selectAll: Boolean = false
     private val projections = mutableListOf<PqlProjection>()
     private val conditions = mutableListOf<PqlCondition>()
     private val orderByList = mutableListOf<PqlOrder>()
+
     private var limit: Int? = null
     private var offset: Int? = null
-    private val groupByFields = mutableListOf<PqlGroupByField>()
+    private val limitsMap = mutableMapOf<PqlScope, Int>()
+    private val offsetsMap = mutableMapOf<PqlScope, Int>()
 
-    // Tracks the current active scope inferred from attributes (e.g., e:, t:, l:)
+    private val groupByFields = mutableListOf<PqlGroupByField>()
     private var detectedScope: PqlScope? = null
+    private var isDeleteQuery: Boolean = false
+    private var deleteScope: PqlScope? = null
 
     private fun updateDetectedScope(newScope: PqlScope?) {
         if (newScope == null) return
@@ -37,17 +36,8 @@ class PqlQueryListener : QLParserBaseListener() {
         PqlScope.EVENT -> 3
     }
 
-    // Fields dedicated to DELETE queries
-    private var isDeleteQuery: Boolean = false
-    private var deleteScope: PqlScope? = null
-
-    override fun enterSelect_all_implicit(ctx: QLParser.Select_all_implicitContext?) {
-        selectAll = true
-    }
-
-    override fun enterSelect_all(ctx: QLParser.Select_allContext?) {
-        selectAll = true
-    }
+    override fun enterSelect_all_implicit(ctx: QLParser.Select_all_implicitContext?) { selectAll = true }
+    override fun enterSelect_all(ctx: QLParser.Select_allContext?) { selectAll = true }
 
     override fun enterScoped_select_all(ctx: QLParser.Scoped_select_allContext?) {
         val scopeToken = ctx?.SCOPE()?.text
@@ -68,7 +58,7 @@ class PqlQueryListener : QLParserBaseListener() {
             if (function != null) {
                 val funcScope = when (function) {
                     is PqlFunction.AggregationFunction -> function.scope
-                    is PqlFunction.ScalarFunction1 -> function.scope
+                    is PqlFunction.ScalarFunction1 -> extractScopeFromArithmetic(function.expression)
                     is PqlFunction.ScalarFunction0 -> null
                 }
                 updateDetectedScope(funcScope)
@@ -77,7 +67,7 @@ class PqlQueryListener : QLParserBaseListener() {
                         scope = funcScope,
                         attribute = when (function) {
                             is PqlFunction.AggregationFunction -> function.attribute
-                            is PqlFunction.ScalarFunction1 -> function.attribute
+                            is PqlFunction.ScalarFunction1 -> null
                             is PqlFunction.ScalarFunction0 -> null
                         },
                         raw = expr.text,
@@ -202,7 +192,7 @@ class PqlQueryListener : QLParserBaseListener() {
             is PqlArithmeticExpression.FunctionCall -> {
                 when (val func = expr.function) {
                     is PqlFunction.AggregationFunction -> func.scope
-                    is PqlFunction.ScalarFunction1 -> func.scope
+                    is PqlFunction.ScalarFunction1 -> extractScopeFromArithmetic(func.expression)
                     is PqlFunction.ScalarFunction0 -> null
                 }
             }
@@ -241,9 +231,8 @@ class PqlQueryListener : QLParserBaseListener() {
 
         val funcScalar1 = ctx.FUNC_SCALAR1()
         if (funcScalar1 != null) {
-            val arithExpr = ctx.arith_expr() ?: return null
-            val attribute = parseAttribute(arithExpr)
-            val (scope, attrName) = attribute ?: return null
+            val arithExprCtx = ctx.arith_expr() ?: return null
+            val expr = parseArithmeticExpression(arithExprCtx) ?: return null
 
             val funcName = funcScalar1.text.lowercase()
             val scalarType = when {
@@ -264,9 +253,8 @@ class PqlQueryListener : QLParserBaseListener() {
                 else -> return null
             }
 
-            return PqlFunction.ScalarFunction1(scalarType, scope, attrName)
+            return PqlFunction.ScalarFunction1(scalarType, expr)
         }
-
         return null
     }
 
@@ -280,10 +268,9 @@ class PqlQueryListener : QLParserBaseListener() {
 
     override fun exitOrdered_expression_root(ctx: QLParser.Ordered_expression_rootContext?) {
         val expr = ctx?.arith_expr() ?: return
-        val direction = when {
-            ctx.order_dir()?.ORDER_DESC() != null -> SortDirection.DESC
-            else -> SortDirection.ASC
-        }
+
+        val hasDescToken = ctx.order_dir()?.ORDER_DESC() != null
+        val direction = if (hasDescToken) SortDirection.DESC else SortDirection.ASC
 
         val func = expr.func()
         if (func != null) {
@@ -291,7 +278,7 @@ class PqlQueryListener : QLParserBaseListener() {
             if (function != null) {
                 val scope = when (function) {
                     is PqlFunction.AggregationFunction -> function.scope ?: PqlScope.EVENT
-                    is PqlFunction.ScalarFunction1 -> function.scope ?: PqlScope.EVENT
+                    is PqlFunction.ScalarFunction1 -> extractScopeFromArithmetic(function.expression) ?: PqlScope.EVENT
                     is PqlFunction.ScalarFunction0 -> PqlScope.EVENT
                 }
                 updateDetectedScope(scope)
@@ -323,21 +310,31 @@ class PqlQueryListener : QLParserBaseListener() {
     }
 
     override fun exitLimit_number(ctx: QLParser.Limit_numberContext?) {
-        val number = ctx?.NUMBER()?.text ?: return
+        val text = ctx?.text ?: return
+        val parts = text.split(":")
         try {
-            if (limit == null) {
-                limit = number.toInt()
+            if (parts.size == 2) {
+                limitsMap[PqlScope.fromToken(parts[0])] = parts[1].toInt()
+            } else {
+                val number = text.toInt()
+                limitsMap[detectedScope ?: PqlScope.EVENT] = number
+                if (limit == null) limit = number
             }
-        } catch (e: NumberFormatException) {}
+        } catch (e: Exception) {}
     }
 
     override fun exitOffset_number(ctx: QLParser.Offset_numberContext?) {
-        val number = ctx?.NUMBER()?.text ?: return
+        val text = ctx?.text ?: return
+        val parts = text.split(":")
         try {
-            if (offset == null) {
-                offset = number.toInt()
+            if (parts.size == 2) {
+                offsetsMap[PqlScope.fromToken(parts[0])] = parts[1].toInt()
+            } else {
+                val number = text.toInt()
+                offsetsMap[detectedScope ?: PqlScope.EVENT] = number
+                if (offset == null) offset = number
             }
-        } catch (e: NumberFormatException) {}
+        } catch (e: Exception) {}
     }
 
     override fun exitGroup_by(ctx: QLParser.Group_byContext?) {
@@ -358,7 +355,7 @@ class PqlQueryListener : QLParserBaseListener() {
     }
 
     private fun parseScopeAndAttribute(id: String): Pair<PqlScope, String>? {
-        val trimmed = id.trim()
+        val trimmed = id.trim().removePrefix("[").removeSuffix("]")
         val hoistingPrefix = trimmed.takeWhile { it == '^' }
         val withoutHoisting = trimmed.drop(hoistingPrefix.length)
 
@@ -374,10 +371,14 @@ class PqlQueryListener : QLParserBaseListener() {
             "e", "event", "events" -> PqlScope.EVENT
             "t", "trace", "traces" -> PqlScope.TRACE
             "l", "log", "logs" -> PqlScope.LOG
+            "c", "classifier" -> PqlScope.EVENT
             else -> null
         }
 
         if (parsedScope != null) {
+            if (possibleScopeToken == "c" || possibleScopeToken == "classifier") {
+                return Pair(PqlScope.EVENT, hoistingPrefix + withoutHoisting)
+            }
             return Pair(parsedScope, hoistingPrefix + parts[1])
         } else {
             val scope = detectedScope ?: PqlScope.EVENT
@@ -409,12 +410,10 @@ class PqlQueryListener : QLParserBaseListener() {
 
         val arithExprs = ctx.arith_expr()
 
-        // POPRAWKA: Obsługa "where true" lub "where false"
         if (arithExprs.size == 1 && ctx.children.size == 1) {
             val value = extractValue(arithExprs[0])
             if (value is Boolean) {
-                if (value) return null // true -> no condition -> fetch all
-                else return PqlCondition.AlwaysFalse
+                if (value) return null else return PqlCondition.AlwaysFalse
             }
             if (value?.toString()?.lowercase() == "true") return null
             if (value?.toString()?.lowercase() == "false") return PqlCondition.AlwaysFalse
@@ -458,19 +457,14 @@ class PqlQueryListener : QLParserBaseListener() {
             val scope = leftAttr.first
             updateDetectedScope(scope)
 
-            return PqlCondition.Simple(
-                scope = scope,
-                attribute = leftAttr.second,
-                operator = operator,
-                value = rightValue
-            )
+            return PqlCondition.Simple(scope = scope, attribute = leftAttr.second, operator = operator, value = rightValue)
         }
 
         if (arithExprs.size == 1 && ctx.in_list() != null) {
             val left = arithExprs[0]
             val leftAttr = parseAttribute(left) ?: return null
-            val inList = parseInList(ctx.in_list()!!) ?: return null
 
+            val inList = parseInList(ctx.in_list()!!) ?: return null
             val operator = when {
                 ctx.OP_IN() != null -> PqlOperator.IN
                 ctx.OP_NOT_IN() != null -> PqlOperator.NOT_IN
@@ -479,18 +473,13 @@ class PqlQueryListener : QLParserBaseListener() {
 
             val scope = leftAttr.first
             updateDetectedScope(scope)
-
-            return PqlCondition.Simple(
-                scope = scope,
-                attribute = leftAttr.second,
-                operator = operator,
-                value = inList
-            )
+            return PqlCondition.Simple(scope = scope, attribute = leftAttr.second, operator = operator, value = inList)
         }
 
         if (arithExprs.size == 1 && ctx.STRING() != null) {
             val left = arithExprs[0]
             val leftAttr = parseAttribute(left) ?: return null
+
             val pattern = ctx.STRING()!!.text.trim('"', '\'')
 
             val operator = when {
@@ -501,13 +490,7 @@ class PqlQueryListener : QLParserBaseListener() {
 
             val scope = leftAttr.first
             updateDetectedScope(scope)
-
-            return PqlCondition.Simple(
-                scope = scope,
-                attribute = leftAttr.second,
-                operator = operator,
-                value = pattern
-            )
+            return PqlCondition.Simple(scope = scope, attribute = leftAttr.second, operator = operator, value = pattern)
         }
 
         if (arithExprs.size == 1) {
@@ -522,13 +505,7 @@ class PqlQueryListener : QLParserBaseListener() {
 
             val scope = leftAttr.first
             updateDetectedScope(scope)
-
-            return PqlCondition.Simple(
-                scope = scope,
-                attribute = leftAttr.second,
-                operator = operator,
-                value = null
-            )
+            return PqlCondition.Simple(scope = scope, attribute = leftAttr.second, operator = operator, value = null)
         }
 
         return null
@@ -541,10 +518,7 @@ class PqlQueryListener : QLParserBaseListener() {
         val ids = idOrScalarList.ID()
         val scalars = idOrScalarList.scalar()
 
-        ids.forEach { item ->
-            items.add(item.text)
-        }
-
+        ids.forEach { items.add(it.text) }
         scalars.forEach { scalar ->
             val value = when {
                 scalar.STRING() != null -> scalar.STRING()!!.text.trim('"', '\'')
@@ -586,13 +560,11 @@ class PqlQueryListener : QLParserBaseListener() {
         val text = ctx.ID()?.text
         if (text != null) {
             val parts = text.split(":", limit = 2)
-            // Jeśli mamy np. e:1.08, wyciągamy "1.08"
             val rawValue = if (parts.size == 2 && parts[0].lowercase() in listOf("e", "event", "t", "trace", "l", "log")) {
                 parts[1]
             } else {
                 text
             }
-            // KLUCZOWA POPRAWKA: Próbujemy zamienić na Double, żeby CouchDB dostało liczbę, nie String
             return rawValue.toDoubleOrNull() ?: rawValue
         }
         return null
@@ -610,11 +582,19 @@ class PqlQueryListener : QLParserBaseListener() {
     }
 
     fun buildQuery(): PqlQuery {
-        if (!selectAll && projections.isEmpty()) {
-            throw IllegalArgumentException("Query must have at least one projection or use SELECT *")
-        }
+        val isSelectAll = selectAll || projections.isEmpty()
 
-        val finalScope = detectedScope ?: PqlScope.EVENT
+        val finalScope = if (projections.isEmpty()) {
+            PqlScope.EVENT
+        } else {
+            val hasEvent = projections.any { it.scope == PqlScope.EVENT || it.allAttributes }
+            val hasTrace = projections.any { it.scope == PqlScope.TRACE }
+            when {
+                hasEvent || isSelectAll -> PqlScope.EVENT
+                hasTrace -> PqlScope.TRACE
+                else -> PqlScope.LOG
+            }
+        }
 
         return PqlQuery(
             collection = finalScope,
@@ -623,8 +603,10 @@ class PqlQueryListener : QLParserBaseListener() {
             orderBy = orderByList,
             limit = limit,
             offset = offset,
+            limits = limitsMap,
+            offsets = offsetsMap,
             groupBy = groupByFields,
-            selectAll = selectAll
+            selectAll = isSelectAll
         )
     }
 

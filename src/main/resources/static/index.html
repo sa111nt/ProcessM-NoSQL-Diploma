@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>PQL Process Mining Engine</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f4f4f9; padding: 20px; }
+        .container { max-width: 900px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+        textarea { width: 100%; height: 100px; margin-bottom: 10px; font-family: monospace; font-size: 14px; padding: 10px; box-sizing: border-box; }
+        button { padding: 10px 15px; background: #007bff; color: white; border: none; cursor: pointer; border-radius: 4px; font-weight: bold; }
+        button:hover { background: #0056b3; }
+        .btn-danger { background: #dc3545; }
+        .btn-danger:hover { background: #c82333; }
+        pre { background: #272822; color: #f8f8f2; padding: 15px; border-radius: 5px; overflow-x: auto; max-height: 400px; }
+        .box { margin-bottom: 30px; padding-bottom: 20px; border-bottom: 1px solid #eee; }
+        .header-flex { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #333; margin-bottom: 20px; padding-bottom: 10px;}
+        .header-flex h1 { margin: 0; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header-flex">
+        <h1>🚀 PQL Process Mining Engine</h1>
+        <button class="btn-danger" onclick="deleteAllLogs()">🗑️ Wyczyść całą bazę</button>
+    </div>
+
+    <div class="box">
+        <h3>1. Wgraj plik logu (.xes, .gz, .zip)</h3>
+        <input type="file" id="fileInput">
+        <button onclick="uploadFile()">Importuj Log</button>
+        <p id="uploadStatus"></p>
+    </div>
+
+    <div class="box">
+        <h3>2. Wykonaj zapytanie PQL</h3>
+        <p><i>Wpisuj bezpośrednio komendy (np. <code>select e:name where l:name='Log'</code>)</i></p>
+        <textarea id="pqlInput" placeholder="Wpisz zapytanie PQL tutaj..."></textarea>
+        <br>
+        <button onclick="executeQuery()">Uruchom Query</button>
+
+        <h4>Wynik (JSON):</h4>
+        <pre id="queryResult">Tutaj pojawi się wynik zapytania...</pre>
+    </div>
+
+    <div class="box" style="border: none;">
+        <h3>3. Pobierz log jako XES</h3>
+        <input type="text" id="logIdInput" placeholder="Wklej ID logu (np. log_1234)">
+        <button onclick="downloadFile()">Eksportuj do .xes</button>
+    </div>
+</div>
+
+<script>
+    // NOWA FUNKCJA: Usuwanie wszystkich logów
+    async function deleteAllLogs() {
+        const confirmed = confirm("⚠️ UWAGA! Czy na pewno chcesz usunąć WSZYSTKIE logi z bazy danych CouchDB? Tej operacji nie można cofnąć.");
+        if (!confirmed) return;
+
+        const statusText = document.getElementById('uploadStatus');
+        statusText.innerHTML = "⏳ Trwa czyszczenie bazy danych...";
+
+        try {
+            const response = await fetch('/api/pql/deleteAll', { method: 'DELETE' });
+            const result = await response.json();
+
+            if(result.status === "SUCCESS") {
+                statusText.innerHTML = `✅ ${result.message}`;
+                document.getElementById('logIdInput').value = "";
+                document.getElementById('queryResult').innerText = "Baza danych jest pusta.";
+            } else {
+                statusText.innerHTML = `❌ Błąd: ${result.message}`;
+            }
+        } catch (error) {
+            statusText.innerHTML = `❌ Błąd połączenia z serwerem API!`;
+        }
+    }
+
+    async function uploadFile() {
+        const fileInput = document.getElementById('fileInput');
+        const statusText = document.getElementById('uploadStatus');
+
+        if (fileInput.files.length === 0) {
+            statusText.innerHTML = "❌ Wybierz najpierw plik!";
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+
+        statusText.innerHTML = "⏳ Wgrywanie i przetwarzanie bazy NoSQL... To może potrwać...";
+
+        try {
+            const response = await fetch('/api/pql/import', { method: 'POST', body: formData });
+            const result = await response.json();
+
+            if(result.status === "SUCCESS") {
+                statusText.innerHTML = `✅ Sukces! ID wgranego logu: <b>${result.logId}</b>`;
+                document.getElementById('logIdInput').value = result.logId;
+            } else {
+                statusText.innerHTML = `❌ Błąd: ${result.message}`;
+            }
+        } catch (error) {
+            statusText.innerHTML = `❌ Błąd połączenia!`;
+        }
+    }
+
+    async function executeQuery() {
+        const queryText = document.getElementById('pqlInput').value;
+        const resultBox = document.getElementById('queryResult');
+        resultBox.innerText = "⏳ Wykonywanie zapytania...";
+
+        try {
+            const response = await fetch('/api/pql/query', {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain' },
+                body: queryText
+            });
+
+            const data = await response.json();
+            resultBox.innerText = JSON.stringify(data, null, 2);
+        } catch (error) {
+            resultBox.innerText = "❌ Wystąpił błąd podczas komunikacji z API.";
+        }
+    }
+
+    function downloadFile() {
+        const logId = document.getElementById('logIdInput').value.trim();
+        if (!logId) {
+            alert("Podaj ID logu do pobrania!");
+            return;
+        }
+        window.location.href = `/api/pql/export/${logId}`;
+    }
+</script>
+
+</body>
+</html>
