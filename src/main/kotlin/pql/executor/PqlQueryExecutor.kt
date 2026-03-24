@@ -11,7 +11,6 @@ import pql.translator.PqlFieldMapper
 import pql.translator.PqlToCouchDbTranslator
 import pql.model.PqlScope
 import pql.model.SortDirection
-import pql.model.PqlStandardAttributes
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
@@ -59,7 +58,7 @@ class PqlQueryExecutor(
         }
 
         fun extractRobustValue(doc: JsonObject, scope: PqlScope, attribute: String): Any? {
-            val resolvedAttribute = PqlStandardAttributes.resolve(scope, attribute)
+            val resolvedAttribute = fieldMapper.getStandardName(attribute)
             val cleanAttrOriginal = resolvedAttribute.removePrefix("^^").removePrefix("^").removePrefix("[").removeSuffix("]")
             val cleanAttrLower = cleanAttrOriginal.lowercase()
 
@@ -76,10 +75,8 @@ class PqlQueryExecutor(
                     return if (v.isJsonPrimitive && v.asJsonPrimitive.isNumber) v.asDouble else if (!v.isJsonNull) v.asString?.intern() else null
                 }
                 if (scope == PqlScope.TRACE) {
-                    if (cleanAttrLower == "id" || cleanAttrLower == "identity:id") return doc.get("traceId")?.takeIf { !it.isJsonNull }?.asString?.substringAfterLast("_")?.intern()
                     if (cleanAttrLower == "name" || cleanAttrLower == "concept:name") return doc.get("t:concept:name")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.get("t:name")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.get("traceId")?.takeIf { !it.isJsonNull }?.asString?.substringAfterLast("_")?.intern()
                 } else if (scope == PqlScope.LOG) {
-                    if (cleanAttrLower == "id" || cleanAttrLower == "identity:id") return doc.get("logId")?.takeIf { !it.isJsonNull }?.asString?.intern()
                     if (cleanAttrLower == "name" || cleanAttrLower == "concept:name") return doc.get("l:concept:name")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.get("l:name")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.get("logId")?.takeIf { !it.isJsonNull }?.asString?.intern()
                 }
                 return null
@@ -155,7 +152,6 @@ class PqlQueryExecutor(
             }
 
             if (scope == PqlScope.EVENT) {
-                if (cleanAttrLower == "id" || cleanAttrLower == "identity:id") return doc.get("identity:id")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.get("_id")?.takeIf { !it.isJsonNull }?.asString?.intern()
                 if (cleanAttrLower == "name" || cleanAttrLower == "concept:name" || cleanAttrLower == "activity") return doc.get("activity")?.takeIf { !it.isJsonNull }?.asString?.intern()
                 if (cleanAttrLower.contains("timestamp")) {
                     val ts = doc.get("timestamp")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.getAsJsonObject("xes_attributes")?.get("time:timestamp")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: ""
@@ -334,7 +330,7 @@ class PqlQueryExecutor(
     private fun validateFields(docs: List<JsonObject>, query: PqlQuery, parentsMap: Map<String, JsonObject>) {
         val checkFields = query.orderBy.map { it.scope to it.attribute } + query.groupBy.map { it.scope to it.attribute }
         for ((scope, attr) in checkFields) {
-            val resolvedAttr = PqlStandardAttributes.resolve(scope, attr)
+            val resolvedAttr = fieldMapper.getStandardName(attr)
             val cleanAttr = resolvedAttr.removePrefix("^^").removePrefix("^")
 
             if (cleanAttr.isEmpty() || cleanAttr.lowercase().matches(Regex(".*(count|min|max|avg|sum)\\(.*\\)"))) continue
@@ -354,15 +350,11 @@ class PqlQueryExecutor(
             }
 
             if (!existsInAny) {
-                // Twardy Fail-Fast zapobiegający przepełnieniu RAM (OOM) przy gigantycznych logach.
                 throw IllegalArgumentException("Classifier or attribute '$attr' not found")
             }
         }
     }
 
-    // =========================================================================
-    // WYKONYWANIE ZAPYTAŃ USUWAJĄCYCH (DELETE) Z KASKADOWANIEM
-    // =========================================================================
     fun executeDelete(query: PqlDeleteQuery): JsonObject {
         try {
             if (query.conditions.any { it is PqlCondition.AlwaysFalse }) {
@@ -426,7 +418,6 @@ class PqlQueryExecutor(
                 rawResultList = executeMemoryOrderBy(rawResultList, syntheticQuery, parentsMap).toMutableList()
             }
 
-            // Aplikacja limitów/offsetów w pamięci
             var stream = rawResultList.asSequence()
             resolvedQuery.offset?.let { stream = stream.drop(it) }
             resolvedQuery.limit?.let { stream = stream.take(it) }
@@ -439,7 +430,6 @@ class PqlQueryExecutor(
                 if (id != null && rev != null) docsToDelete[id] = rev
             }
 
-            // KASKADOWANIE USUWANIA ZGODNIE ZE STANDARDEM IEEE 1849-2016
             if (targetScope == PqlScope.LOG || targetScope == PqlScope.TRACE) {
                 val logIds = mutableSetOf<String>()
                 val traceIds = mutableSetOf<String>()
@@ -509,7 +499,6 @@ class PqlQueryExecutor(
                     try {
                         deletedCount += dbManager.deleteDocs(dbName, deleteQuery)
                     } catch (e: Exception) {
-                        println("[WARN] Błąd podczas usuwania paczki dokumentów: ${e.message}")
                     }
                 }
             }
@@ -520,7 +509,6 @@ class PqlQueryExecutor(
             }
 
         } catch (e: Throwable) {
-            e.printStackTrace()
             throw e
         }
     }
@@ -618,7 +606,6 @@ class PqlQueryExecutor(
             return formatter.format(finalArray, resolvedQuery)
 
         } catch (e: Throwable) {
-            e.printStackTrace()
             throw e
         }
     }
@@ -775,13 +762,13 @@ class PqlQueryExecutor(
         val traceName = traceDoc.get("identity:id")?.takeIf { !it.isJsonNull }?.asString
             ?: traceDoc.getAsJsonObject("xes_attributes")?.get("concept:name")?.takeIf { !it.isJsonNull }?.asString
             ?: traceDoc.get("originalTraceId")?.takeIf { !it.isJsonNull }?.asString
-            ?: traceDoc.get("_id")?.takeIf { !it.isJsonNull }?.asString?.substringAfterLast("_")
 
         if (traceName != null) {
             eventObj.addProperty("t:name", traceName)
             eventObj.addProperty("t:concept:name", traceName)
         }
-        val traceId = traceDoc.get("identity:id")?.takeIf { !it.isJsonNull }?.asString ?: traceDoc.get("_id")?.takeIf { !it.isJsonNull }?.asString?.substringAfterLast("_")
+
+        val traceId = traceDoc.get("identity:id")?.takeIf { !it.isJsonNull }?.asString
         if (traceId != null) eventObj.addProperty("t:id", traceId)
 
         traceDoc.getAsJsonObject("xes_attributes")?.entrySet()?.forEach { (k, v) ->
@@ -794,13 +781,13 @@ class PqlQueryExecutor(
         if (logDoc == null) return
         val logName = logDoc.getAsJsonObject("log_attributes")?.get("concept:name")?.takeIf { !it.isJsonNull }?.asString
             ?: logDoc.get("identity:id")?.takeIf { !it.isJsonNull }?.asString
-            ?: logDoc.get("_id")?.takeIf { !it.isJsonNull }?.asString
 
         if (logName != null) {
             eventObj.addProperty("l:name", logName)
             eventObj.addProperty("l:concept:name", logName)
         }
-        val logId = logDoc.get("_id")?.takeIf { !it.isJsonNull }?.asString
+
+        val logId = logDoc.get("identity:id")?.takeIf { !it.isJsonNull }?.asString
         if (logId != null) eventObj.addProperty("l:id", logId)
 
         logDoc.getAsJsonObject("log_attributes")?.entrySet()?.forEach { (k, v) ->

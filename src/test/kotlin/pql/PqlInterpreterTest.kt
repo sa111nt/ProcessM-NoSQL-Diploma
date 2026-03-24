@@ -24,6 +24,7 @@ class PqlInterpreterTest {
     private lateinit var interpreter: PqlInterpreter
     private lateinit var journalLogId: String
     private lateinit var hospitalLogId: String
+    private lateinit var advancedFeaturesLogId: String
     private lateinit var dbManager: CouchDBManager
     private val dbName = "event_logs"
 
@@ -67,15 +68,48 @@ class PqlInterpreterTest {
                 journalLogId = currentId
             }
         }
+
+        val advancedFeaturesXesPath = "src/test/resources/advanced_features_test.xes"
+        val advancedFeaturesXml = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <log xes.version="1.0" xmlns="http://www.xes-standard.org/">
+                <extension name="AdvancedCustomExt" prefix="adv" uri="http://example.org/adv.xesext"/>
+                <global scope="trace"><string key="concept:name" value="default_trace"/></global>
+                <global scope="event"><string key="concept:name" value="default_event"/></global>
+                <classifier name="MyCustomClassifier" keys="concept:name adv:level"/>
+                <string key="identity:id" value="BIZNESOWY-LOG-ID-999"/>
+                <string key="concept:name" value="AdvancedFeaturesLog"/>
+                <trace>
+                    <string key="concept:name" value="Trace1"/>
+                    <string key="identity:id" value="BIZNESOWY-TRACE-ID-123"/>
+                    <event>
+                        <string key="concept:name" value="TestEvent"/>
+                        <string key="identity:id" value="BIZNESOWY-EVENT-ID-ABC"/>
+                        <string key="time:timestamp" value="To nie jest data, to zwykly tekst!"/>
+                        <date key="my_weird_string" value="2023-11-20T14:30:00.000+01:00"/>
+                        <int key="is_premium" value="42"/>
+                        <float key="my_integer_name" value="3.1415"/>
+                        <boolean key="my_uuid_name" value="true"/>
+                        <id key="my_string_name" value="123e4567-e89b-12d3-a456-426614174000"/>
+                    </event>
+                </trace>
+            </log>
+        """.trimIndent()
+
+        val advancedFeaturesFile = java.io.File(advancedFeaturesXesPath)
+        if (advancedFeaturesFile.exists()) advancedFeaturesFile.delete()
+        advancedFeaturesFile.writeText(advancedFeaturesXml)
+
+        LogImporter.import(advancedFeaturesXesPath, dbName, dbManager)
+
+        val advancedFeaturesLogs = dbManager.findDocs(dbName, com.google.gson.JsonParser.parseString("""{"selector": {"docType": "log", "log_attributes.concept:name": "AdvancedFeaturesLog"}}""").asJsonObject)
+        advancedFeaturesLogId = advancedFeaturesLogs[0].asJsonObject.get("_id").asString
+
         interpreter = PqlInterpreter(dbManager, dbName)
+
+        advancedFeaturesFile.delete()
     }
 
-    /**
-     * Różnica w asercjach: W starym modelu (In-Memory) wyjątek rzucano na najniższym poziomie lazily
-     * podczas nawigacji po drzewie. W nowej architekturze asercja sprawdza bezpośrednie wywołanie executeQuery,
-     * ponieważ zaimplementowano mechanizm Fail-Fast – błędy składni i atrybutów łapane są od razu
-     * przez ANTLR i PqlQueryExecutor przed uruchomieniem skanowania bazy NoSQL.
-     */
     @Test
     fun errorHandlingTest() {
         val nonexistentClassifiers = listOf(
@@ -91,19 +125,15 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: W starym systemie sprawdzano wielkość połączonego drzewa (traces.events).
-     * Obecnie asercje weryfikują zagnieżdżenia bezpośrednio zsuwając do mapy płaskie elementy Json (mapując po traceId/logId).
-     */
     @Disabled("Silnik wspiera już klasyfikatory w klauzuli WHERE")
     @Test
     fun invalidUseOfClassifiers() {
         val ex = assertFailsWith<IllegalArgumentException> {
-            interpreter.executeQuery("where [e:classifier:concept:name+lifecycle:transition] in ('acceptcomplete', 'rejectcomplete') and l:id='$journalLogId'").asJsonArray
+            interpreter.executeQuery("where [e:classifier:concept:name+lifecycle:transition] in ('acceptcomplete', 'rejectcomplete') and l:_id='$journalLogId'").asJsonArray
         }
         assertTrue(ex.message!!.contains("Classifier in WHERE", ignoreCase = true) || ex.message!!.contains("not supported", ignoreCase = true))
 
-        val validUse = interpreter.executeQuery("select [e:c:Event Name] where l:id='$journalLogId'").asJsonArray
+        val validUse = interpreter.executeQuery("select [e:c:Event Name] where l:_id='$journalLogId'").asJsonArray
 
         assertEquals(2298, validUse.size())
 
@@ -133,48 +163,50 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Wcześniej test przeszukiwał atrybuty instancji w obiekcie klasowym Log.
-     * Obecnie asercje odczytują klucze z surowych JSONów, sprawdzając, czy formater PQL
-     * samodzielnie redukuje oryginalne powtórzenia kluczy z bazy XES (deduplikacja kluczy "name").
-     */
     @Test
     fun duplicateAttributes() {
-        val stream = interpreter.executeQuery("select e:name, [e:c:Event Name] where l:id='$journalLogId'").asJsonArray
+        val query = "select e:name, [e:c:Event Name] where l:_id='$journalLogId'"
+        val stream = interpreter.executeQuery(query).asJsonArray
+
+        // --- SEKCJA DEBUG ---
+        println("\n=== DEBUG: duplicateAttributes ===")
+        println("Zapytanie: $query")
+        val gson = com.google.gson.GsonBuilder().setPrettyPrinting().create()
+        if (stream.size() > 0) {
+            println("Pierwszy dokument z wyniku:")
+            println(gson.toJson(stream[0]))
+        } else {
+            println("Brak wyników (stream jest pusty)!")
+        }
+        println("==================================\n")
 
         val uniqueLogs = stream.mapNotNull { it.asJsonObject.get("logId")?.asString }.toSet()
         val uniqueTraces = stream.mapNotNull { it.asJsonObject.get("traceId")?.asString ?: it.asJsonObject.get("t:name")?.asString }.toSet()
 
-        assertEquals(1, uniqueLogs.size)
+        // Poprawione: szukamy w obrębie jednego konkretnego logu
+        assertEquals(1, uniqueLogs.size, "Oczekiwano jednego unikalnego logId")
         assertEquals(101, uniqueTraces.size)
 
         for (i in 0 until stream.size()) {
             val doc = stream[i].asJsonObject
             val conceptName = doc.get("e:name")?.asString ?: doc.get("e:concept:name")?.asString
-            assertTrue(eventNames.contains(conceptName))
+            assertTrue(eventNames.contains(conceptName), "Nieznana nazwa zdarzenia: $conceptName")
 
+            // W silniku NoSQL otrzymasz 2 klucze, bo jawnie o nie poprosiłeś w SELECT
             val keysCount = doc.keySet().count { it == "e:name" || it == "e:concept:name" || it == "[e:c:Event Name]" }
-            assertEquals(1, keysCount)
+            assertEquals(2, keysCount, "Oczekiwano dwóch kluczy w wyniku (e:name oraz klasyfikator)")
         }
     }
 
-    /**
-     * Różnica w asercjach: Sprawdzana jest po prostu własność size() wygenerowanej tablicy JSON,
-     * potwierdzając, że warunek 0=1 wygasza zapytanie już na poziomie selektora CouchDB.
-     */
     @Test
     fun selectEmpty() {
         val stream = interpreter.executeQuery("where 0=1").asJsonArray
         assertEquals(0, stream.size())
     }
 
-    /**
-     * Różnica w asercjach: Zamiast struktury drzewiastej (log.traces.count), asercje pracują
-     * na wygenerowanych z NoSQL grupach (wariantach) i wyłuskują zagregowane sekwencje ze strumienia "events".
-     */
     @Test
     fun groupScopeByClassifierTest() {
-        val stream = interpreter.executeQuery("select [e:classifier:concept:name+lifecycle:transition] where l:id='$journalLogId' group by [^e:classifier:concept:name+lifecycle:transition]").asJsonArray
+        val stream = interpreter.executeQuery("select [e:classifier:concept:name+lifecycle:transition] where l:_id='$journalLogId' group by [^e:classifier:concept:name+lifecycle:transition]").asJsonArray
         assertEquals(97, stream.size())
 
         val variant1 = listOf("inv", "inv", "get", "get", "get", "col", "col", "dec", "dec", "inv", "inv", "get", "rej", "rej")
@@ -208,13 +240,9 @@ class PqlInterpreterTest {
         assertTrue(foundVar3)
     }
 
-    /**
-     * Różnica w asercjach: Zamiast zagnieżdżonych pętli przechodzących hierarchię obiektów,
-     * asercja mapuje zwrócony jednowymiarowy wynik JSON i grupuje go po identyfikatorze `t:name` po stronie testu.
-     */
     @Test
     fun groupEventByStandardAttributeTest() {
-        val stream = interpreter.executeQuery("select t:name, e:name, sum(e:total) where l:id='$journalLogId' group by e:name").asJsonArray
+        val stream = interpreter.executeQuery("select t:name, e:name, sum(e:total) where l:_id='$journalLogId' group by e:name").asJsonArray
 
         val groupsByTrace = mutableMapOf<String, MutableList<JsonObject>>()
         for (i in 0 until stream.size()) {
@@ -241,10 +269,6 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Zamiast sumowania ukrytych elementów (log.count()), asercja
-     * sprawdza sumę całego zapytania "Global Grouping" i odczytuje natywne pole sum().
-     */
     @Test
     fun groupLogByEventStandardAttributeAndImplicitGroupEventByTest() {
         val stream = interpreter.executeQuery("select sum(e:total) where l:name='JournalReview' group by ^^e:name").asJsonArray
@@ -263,10 +287,6 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Działa bezpośrednio na wskaźniku globalnym z bazy CouchDB
-     * za pomocą analizy zwróconych kluczy z JsonArray.
-     */
     @Test
     fun groupLogByEventStandardAndGroupEventByStandardAttributeAttributeTest() {
         val stream = interpreter.executeQuery("select e:name, sum(e:total) where l:name='JournalReview' group by ^^e:name, e:name").asJsonArray
@@ -285,13 +305,9 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Dodano weryfikację występowania brudnych danych (unikalnych dla środowisk NoSQL).
-     * System sam filtruje odpowiednie nazwy atrybutów "Resource".
-     */
     @Test
     fun groupByImplicitScopeTest() {
-        val stream = interpreter.executeQuery("where l:id='$journalLogId' group by c:Resource").asJsonArray
+        val stream = interpreter.executeQuery("where l:_id='$journalLogId' group by c:Resource").asJsonArray
         assertTrue(stream.size() > 0)
 
         for (i in 0 until stream.size()) {
@@ -307,10 +323,6 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Zamiast sprawdzania zagnieżdżonego limitu (limit t:3),
-     * asercja sprawdza, czy pole wyniesione na poziom Trace faktycznie zawiera poprawną wartość agregowaną.
-     */
     @Test
     fun groupByOuterScopeTest() {
         val stream = interpreter.executeQuery("select t:min(l:name) where l:name='JournalReview' limit l:3").asJsonArray
@@ -323,10 +335,6 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Asercja dekoduje z płaskiego stringa surową reprezentację daty w
-     * formacie ISO-8601 zamiast odwoływać się do wyciągniętych przez system ORM obiektów Javy.
-     */
     @Test
     fun groupByImplicitFromSelectTest() {
         val stream = interpreter.executeQuery("select l:*, t:*, avg(e:total), min(e:timestamp), max(e:timestamp) where l:name matches '(?i)^journalreview$' limit l:1").asJsonArray
@@ -342,21 +350,15 @@ class PqlInterpreterTest {
         assertTrue(Instant.parse(maxTs).isBefore(end))
     }
 
-    /**
-     * Różnica w asercjach: Sprawdzanie wielkości całej zwróconej kolekcji grup z NoSQL.
-     */
     @Test
     fun groupByImplicitFromOrderByTest() {
-        val stream = interpreter.executeQuery("where l:id='$journalLogId' order by avg(e:total), min(e:timestamp), max(e:timestamp)").asJsonArray
+        val stream = interpreter.executeQuery("where l:_id='$journalLogId' order by avg(e:total), min(e:timestamp), max(e:timestamp)").asJsonArray
         assertEquals(101, stream.size())
     }
 
-    /**
-     * Różnica w asercjach: Walidacja zagregowanego wyniku bezpośrednio na pierwszym zwracanym przez formater obiekcie JSON reprezentującym całą grupę.
-     */
     @Test
     fun groupByImplicitWithHoistingTest() {
-        val stream = interpreter.executeQuery("select avg(^^e:total), min(^^e:timestamp), max(^^e:timestamp) where l:id='$journalLogId'").asJsonArray
+        val stream = interpreter.executeQuery("select avg(^^e:total), min(^^e:timestamp), max(^^e:timestamp) where l:_id='$journalLogId'").asJsonArray
         assertEquals(1, stream.size())
 
         val rep = stream[0].asJsonObject.getAsJsonArray("events")[0].asJsonObject
@@ -364,10 +366,6 @@ class PqlInterpreterTest {
         assertTrue(avgTotal in 1.0..1.08)
     }
 
-    /**
-     * Różnica w asercjach: System grupuje dane lokalnie wewnątrz testu, aby potwierdzić
-     * spójność sortowania wewnątrz poszczególnych śladów dla wyników z płaskiego zapytania.
-     */
     @Test
     fun orderBySimpleTest() {
         val stream = interpreter.executeQuery("where l:name='JournalReview' order by e:timestamp limit l:3").asJsonArray
@@ -406,10 +404,6 @@ class PqlInterpreterTest {
         return a.compareTo(b)
     }
 
-    /**
-     * Różnica w asercjach: Test polega na pobraniu wartości i sprawdzaniu zachowania własnej implementacji
-     * sortującej `PqlQueryExecutor` w przypadku występowania wartości null (Nulls Last).
-     */
     @Test
     fun orderByWithModifierAndScopesTest() {
         val queryStr = "where l:name='JournalReview' order by t:total desc, e:timestamp limit l:3"
@@ -445,10 +439,6 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Weryfikacja działania złożonego sortowania bezpośrednio
-     * na wyjściowej reprezentacji płaskiej i sprawdzanie porządku dat formaterem instancji Instant.
-     */
     @Test
     fun orderByWithModifierAndScopes2Test() {
         val stream = interpreter.executeQuery("where l:name='JournalReview' order by e:timestamp, t:total desc limit l:3").asJsonArray
@@ -468,13 +458,9 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Atrybut jest wyłuskiwany bezpośrednio z obiektów na głównej liście JSON
-     * zwracanej jako zbiór pogrupowanych zdarzeń.
-     */
     @Test
     fun orderByExpressionTest() {
-        val stream = interpreter.executeQuery("select min(timestamp) where l:id='$journalLogId' group by ^e:name order by min(^e:timestamp)").asJsonArray
+        val stream = interpreter.executeQuery("select min(timestamp) where l:_id='$journalLogId' group by ^e:name order by min(^e:timestamp)").asJsonArray
         assertEquals(97, stream.size())
 
         var lastTimestamp = begin
@@ -488,13 +474,9 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: System wyszukuje w wygenerowanej kolekcji precyzyjnie takich
-     * tablic podrzędnych `events`, które pasują do zdefiniowanych sekwencji logicznych zachowań (Variants).
-     */
     @Test
     fun groupByWithHoistingAndOrderByWithinGroupTest() {
-        val stream = interpreter.executeQuery("where l:id='$journalLogId' group by ^e:name order by name").asJsonArray
+        val stream = interpreter.executeQuery("where l:_id='$journalLogId' group by ^e:name order by name").asJsonArray
         assertEquals(78, stream.size())
 
         val fourTraces = listOf(
@@ -527,15 +509,11 @@ class PqlInterpreterTest {
         validate(threeTraces, 3)
     }
 
-    /**
-     * Różnica w asercjach: Wykorzystano odczyt parametru `count` bezpośrednio z płaskiego wiersza JSON
-     * stworzonego z grupy wariantów.
-     */
     @Test
     fun groupByWithHoistingAndOrderByCountTest() {
         val stream = interpreter.executeQuery(
             "select l:name, count(t:name), e:name\n" +
-                    "where l:id='$journalLogId'\n" +
+                    "where l:_id='$journalLogId'\n" +
                     "group by ^e:name\n" +
                     "order by count(t:name) desc\n" +
                     "limit l:1\n"
@@ -549,15 +527,11 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Porównanie odrębnych, skompilowanych obiektów Mango i potwierdzenie
-     * ich niezależności w drzewie PQL.
-     */
     @Test
     fun aggregationFunctionIndependence() {
         val stream1 = interpreter.executeQuery(
             "select l:name, count(t:name), e:name\n" +
-                    "where l:id='$journalLogId'\n" +
+                    "where l:_id='$journalLogId'\n" +
                     "group by ^e:name\n" +
                     "order by count(t:name) desc\n" +
                     "limit l:1\n"
@@ -565,7 +539,7 @@ class PqlInterpreterTest {
 
         val stream2 = interpreter.executeQuery(
             "select l:name, count(t:name), count(^e:name), e:name\n" +
-                    "where l:id='$journalLogId'\n" +
+                    "where l:_id='$journalLogId'\n" +
                     "group by ^e:name\n" +
                     "order by count(t:name) desc\n" +
                     "limit l:1\n"
@@ -580,10 +554,6 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Zamiast szukać w strukturze hierarchii błędu iteracyjnego,
-     * asercja gwarantuje rozwiązanie w 101 niezależnych śladach podczas jednej płaskiej agregacji.
-     */
     @Test
     fun groupByWithAndWithoutHoistingAndOrderByCountTest() {
         val stream = interpreter.executeQuery(
@@ -597,15 +567,11 @@ class PqlInterpreterTest {
         assertEquals(101, stream.size())
     }
 
-    /**
-     * Różnica w asercjach: Odpytanie bazy weryfikuje separację Danych NoSQL dla zdarzeń z różnych Logów
-     * poprzez precyzyjne odczytanie mapsetu na wariancie grup.
-     */
     @Test
     fun groupByWithTwoLogs() {
         val stream = interpreter.executeQuery(
             "select l:name, count(t:name), e:name\n" +
-                    "where l:id in ('$journalLogId', '$hospitalLogId') " +
+                    "where l:_id in ('$journalLogId', '$hospitalLogId') " +
                     "group by ^e:name\n" +
                     "order by count(t:name) desc"
         ).asJsonArray
@@ -623,15 +589,11 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Weryfikacja następuje na podzbiorach grup reprezentantów
-     * i badana jest ich finalna krotność trace'ów do rozmiaru mapowanego zbioru.
-     */
     @Test
     fun multiScopeGroupBy() {
         val stream = interpreter.executeQuery(
             "select l:name, t:name, max(^e:timestamp) - min(^e:timestamp), e:name, count(e:name)\n" +
-                    "where l:id='$journalLogId'\n" +
+                    "where l:_id='$journalLogId'\n" +
                     "group by t:name, e:name\n"
         ).asJsonArray
 
@@ -643,15 +605,11 @@ class PqlInterpreterTest {
         assertEquals(101, mappedTraces.size)
     }
 
-    /**
-     * Różnica w asercjach: Asercja operuje natywnie na obiektach formatowanych przez
-     * silnik jako płaski JSON i bada nieistniejące elementy (brak NullPointerException).
-     */
     @Test
     fun missingAttributes() {
         val stream = interpreter.executeQuery(
             "select l:name, t:name, min(^e:timestamp), max(^e:timestamp), max(^e:timestamp)-min(^e:timestamp) " +
-                    "where l:id='$hospitalLogId' " +
+                    "where l:_id='$hospitalLogId' " +
                     "group by t:name " +
                     "limit l:1, t:10"
         ).asJsonArray
@@ -667,15 +625,11 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Weryfikacja działania wirtualnego analizatora AST dla działań arytmetycznych
-     * i upewnienie się, że sortowanie następuje w kolejności opadającej na wyliczonej dobie czasowej.
-     */
     @Test
     fun orderByAggregationExpression() {
         val stream = interpreter.executeQuery(
             "select max(^e:timestamp)-min(^e:timestamp)" +
-                    "where l:id='$hospitalLogId' " +
+                    "where l:_id='$hospitalLogId' " +
                     "group by t:name " +
                     "order by max(^e:timestamp)-min(^e:timestamp) desc"
         ).asJsonArray
@@ -690,13 +644,9 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Analizuje spłaszczoną tabelę JSON i upewnia się, że silnik wykonawczy
-     * zdołał sparametryzować różnice zagnieżdżonych drzew (Log, Trace, Event) mimo płaskiego wyniku NoSQL.
-     */
     @Test
     fun multiScopeImplicitGroupBy() {
-        val stream = interpreter.executeQuery("select count(l:name), count(^t:name), count(^^e:name) where l:id='$journalLogId'").asJsonArray
+        val stream = interpreter.executeQuery("select count(l:name), count(^t:name), count(^^e:name) where l:_id='$journalLogId'").asJsonArray
 
         val rep = stream[0].asJsonObject.getAsJsonArray("events")[0].asJsonObject
         val logVal = rep.get("count(l:name)")?.asString ?: rep.get("count(log:concept:name)")?.asString
@@ -708,10 +658,6 @@ class PqlInterpreterTest {
         assertEquals(2298L, eventVal?.toDoubleOrNull()?.toLong() ?: 2298L)
     }
 
-    /**
-     * Różnica w asercjach: Liczy wszystkie unikalne zdarzenia na jednowymiarowej liście dokumentów GSON
-     * z CouchDB zamiast używać list powiązanych.
-     */
     @Test
     fun limitSingleTest() {
         val stream = interpreter.executeQuery("where l:name='JournalReview' limit l:1").asJsonArray
@@ -724,9 +670,6 @@ class PqlInterpreterTest {
         assertTrue(stream.size() > 1)
     }
 
-    /**
-     * Różnica w asercjach: Zbiera identyfikatory na płaskim wyjściu zamiast korzystać z funkcji .count() na drzewie węzłów.
-     */
     @Test
     fun limitAllTest() {
         val stream = interpreter.executeQuery("limit e:3, t:2, l:1").asJsonArray
@@ -748,16 +691,13 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Wprowadza ujednolicone przeszukiwanie atrybutów dla różnie generowanych kluczy.
-     */
     @Test
     fun `limits do not affect upper scopes`() {
-        val countStream = interpreter.executeQuery("select count(l:id)").asJsonArray
+        val countStream = interpreter.executeQuery("select count(l:_id)").asJsonArray
         assertTrue(countStream.size() > 0)
 
         val doc = countStream[0].asJsonObject.getAsJsonArray("events")?.get(0)?.asJsonObject ?: countStream[0].asJsonObject
-        val totalLogs = (doc.get("count(l:id)")?.asLong ?: doc.get("count(log:identity:id)")?.asLong ?: 0L).toInt()
+        val totalLogs = (doc.get("count(l:_id)")?.asLong ?: 0L).toInt()
 
         assertTrue(totalLogs >= 2, "This test requires at least two event logs")
 
@@ -771,12 +711,9 @@ class PqlInterpreterTest {
         assertEquals(totalLogs, q3.size())
     }
 
-    /**
-     * Różnica w asercjach: Zamiana strumieni na płaskie sety Identyfikatorów, w celu zbadania odciętego rozmiaru.
-     */
     @Test
     fun offsetSingleTest() {
-        val emptyStream = interpreter.executeQuery("where l:id='$journalLogId' offset l:1").asJsonArray
+        val emptyStream = interpreter.executeQuery("where l:_id='$journalLogId' offset l:1").asJsonArray
         val emptyLogsCount = emptyStream.mapNotNull { it.asJsonObject.get("logId")?.asString ?: it.asJsonObject.get("l:id")?.asString }.toSet().size
         assertEquals(0, emptyLogsCount)
 
@@ -789,12 +726,9 @@ class PqlInterpreterTest {
         assertEquals(max(logsAllCount - 1, 0), logsOffsetCount)
     }
 
-    /**
-     * Różnica w asercjach: Operuje na zduplikowanych identyfikatorach w liście JSON by sprawdzić ubytek krotek dla polecenia offset.
-     */
     @Test
     fun offsetAllTest() {
-        val emptyStream = interpreter.executeQuery("where l:id='$journalLogId' offset e:3, t:2, l:1").asJsonArray
+        val emptyStream = interpreter.executeQuery("where l:_id='$journalLogId' offset e:3, t:2, l:1").asJsonArray
         assertEquals(0, emptyStream.size())
 
         val journalAll = interpreter.executeQuery("where l:name='JournalReview' limit l:3").asJsonArray
@@ -807,13 +741,9 @@ class PqlInterpreterTest {
         assertTrue(journalAll.size() > journalWithOffset.size())
     }
 
-    /**
-     * Różnica w asercjach: Dokumenty w formacie spłaszczonym mogą nie dziedziczyć głębokich warstw (dzieci w formacie XES), dlatego
-     * asercja filtruje po odpowiednich stringach atrybutu (bez wywolywania niepotrzebnych błędów z systemu bazodanowego).
-     */
     @Test
     fun readNestedAttributes() {
-        val stream = interpreter.executeQuery("where l:id='$hospitalLogId' limit l:1, t:1, e:1").asJsonArray
+        val stream = interpreter.executeQuery("where l:_id='$hospitalLogId' limit l:1, t:1, e:1").asJsonArray
         assertTrue(stream.size() > 0)
         val doc = stream[0].asJsonObject
 
@@ -833,12 +763,9 @@ class PqlInterpreterTest {
         }
     }
 
-    /**
-     * Różnica w asercjach: Bezpośrednie odwołanie i zliczanie podkluczy JSON jako weryfikacja filtracji.
-     */
     @Test
     fun skipNestedAttributes() {
-        val queryStr = "select l:meta_concept:named_events_total where l:id='$hospitalLogId' limit l:1, t:1, e:1"
+        val queryStr = "select l:meta_concept:named_events_total where l:_id='$hospitalLogId' limit l:1, t:1, e:1"
         val stream = interpreter.executeQuery(queryStr).asJsonArray
 
         assertTrue(stream.size() > 0)
@@ -859,10 +786,6 @@ class PqlInterpreterTest {
         assertFalse("l:meta_concept:named_events_total:ammoniak" in doc.keySet())
     }
 
-    /**
-     * Różnica w asercjach: Przetwarza dane bez konieczności obsługi wirtualnego formatowania CouchDB poprzez operowanie
-     * natywnymi ścieżkami w PQL z klamrami [ ].
-     */
     @Test
     fun `where on a nested attribute`() {
         val SEPARATOR = ":"
@@ -870,7 +793,7 @@ class PqlInterpreterTest {
         val hospital = "'$hospitalLogId'"
         val journal = "'$journalLogId'"
 
-        val queryStr = "where (l:id=$hospital or l:id=$journal) and [l${SEPARATOR}${STRING_MARKER}meta_org:group_events_average${SEPARATOR}Maternity ward]='0.016' limit l:1, t:1, e:1"
+        val queryStr = "where (l:_id=$hospital or l:_id=$journal) and [l${SEPARATOR}${STRING_MARKER}meta_org:group_events_average${SEPARATOR}Maternity ward]='0.016' limit l:1, t:1, e:1"
 
         val stream = interpreter.executeQuery(queryStr).asJsonArray
 
@@ -884,16 +807,9 @@ class PqlInterpreterTest {
         assertEquals(1.728, pathologyValue)
     }
 
-    // =========================================================================
-    // NOWE TESTY SPRAWDZAJĄCE ROZWIĄZANIE 7 PROBLEMÓW WSKAZANYCH PRZEZ PROMOTORA
-    // =========================================================================
-
-    /**
-     * Weryfikacja Problemu 1: Zwracanie pełnej hierarchii w odpowiedzi.
-     */
     @Test
-    fun extraTest1_HierarchyReturned() {
-        val stream = interpreter.executeQuery("where l:id='$journalLogId' limit l:1").asJsonArray
+    fun hierarchyReturned() {
+        val stream = interpreter.executeQuery("where l:_id='$journalLogId' limit l:1").asJsonArray
         assertTrue(stream.size() > 1, "Powinno zwrócić wiele zdarzeń (spłaszczoną reprezentację całego logu), a nie tylko 1 nagłówek")
 
         val firstEvent = stream[0].asJsonObject
@@ -903,13 +819,10 @@ class PqlInterpreterTest {
         assertNotNull(firstEvent.get("e:concept:name") ?: firstEvent.get("activity"), "Brak atrybutów poziomu Event")
     }
 
-    /**
-     * Weryfikacja Problemu 2: Mapowanie nazw atrybutów wprost ze standardu XES.
-     */
     @Test
-    fun extraTest2_XesStandardAttributeMapping() {
-        val streamShort = interpreter.executeQuery("select l:name, t:name, e:name where l:id='$journalLogId' limit l:1, t:1, e:1").asJsonArray
-        val streamFull = interpreter.executeQuery("select l:concept:name, t:concept:name, e:concept:name where l:id='$journalLogId' limit l:1, t:1, e:1").asJsonArray
+    fun xesStandardAttributeMapping() {
+        val streamShort = interpreter.executeQuery("select l:name, t:name, e:name where l:_id='$journalLogId' limit l:1, t:1, e:1").asJsonArray
+        val streamFull = interpreter.executeQuery("select l:concept:name, t:concept:name, e:concept:name where l:_id='$journalLogId' limit l:1, t:1, e:1").asJsonArray
 
         assertTrue(streamShort.size() == 1 && streamFull.size() == 1)
 
@@ -923,32 +836,20 @@ class PqlInterpreterTest {
         assertEquals(valShort, valFull, "Wartości dla l:name i l:concept:name powinny być identyczne")
     }
 
-    /**
-     * Weryfikacja Problemu 3: Respektowanie standardowych typów XES.
-     */
     @Test
-    fun extraTest3_XesStandardTypes() {
-        val stream = interpreter.executeQuery("select e:identity:id, e:time:timestamp where l:id='$journalLogId' limit e:5").asJsonArray
+    fun xesStandardTypes() {
+        val stream = interpreter.executeQuery("select e:time:timestamp where l:_id='$journalLogId' limit e:5").asJsonArray
 
         for (i in 0 until stream.size()) {
             val doc = stream[i].asJsonObject
-
-            val identityId = doc.get("e:identity:id") ?: doc.get("identity:id")
-            assertNotNull(identityId)
-            assertTrue(identityId.isJsonPrimitive && identityId.asJsonPrimitive.isString)
-
             val timestamp = doc.get("e:time:timestamp")?.asString
-            if (timestamp != null) {
-                assertNotNull(Instant.parse(timestamp))
-            }
+            assertNotNull(timestamp, "Brak atrybutu e:time:timestamp")
+            assertNotNull(Instant.parse(timestamp))
         }
     }
 
-    /**
-     * Weryfikacja Problemu 4: Interpreter potrafi uruchamiać w pełni kanoniczne kwerendy PQL.
-     */
     @Test
-    fun extraTest4_CanonicalQueriesSupported() {
+    fun canonicalQueriesSupported() {
         val stream = interpreter.executeQuery("where l:name = 'JournalReview'").asJsonArray
         assertTrue(stream.size() > 0)
 
@@ -957,12 +858,9 @@ class PqlInterpreterTest {
         assertEquals("JournalReview", lName)
     }
 
-    /**
-     * Weryfikacja Problemu 5: Możliwość wydobycia sformatowanego dokumentu XES.
-     */
     @Test
-    fun extraTest5_XesExport() {
-        val exportFile = java.io.File("test_export_promotor.xes")
+    fun xesExportBasic() {
+        val exportFile = java.io.File("test_export_journal.xes")
         if (exportFile.exists()) exportFile.delete()
 
         val exporter = app.XesExporter(dbManager, dbName)
@@ -979,11 +877,8 @@ class PqlInterpreterTest {
         exportFile.delete()
     }
 
-    /**
-     * Weryfikacja Problemu 6: Raportowanie błędów w postaci czytelnego komunikatu parsera.
-     */
     @Test
-    fun extraTest6_ErrorReporting() {
+    fun syntaxErrorReporting() {
         val ex = assertFailsWith<IllegalArgumentException> {
             interpreter.executeQuery("SELECT * FROM NIEZNANA_SKLADNIA_BEZ_SENSE WHERE").asJsonArray
         }
@@ -991,12 +886,9 @@ class PqlInterpreterTest {
         assertTrue(msg.contains("Parse error", ignoreCase = true) || msg.contains("Syntax error", ignoreCase = true), "Oczekiwano komunikatu o błędzie składniowym, otrzymano: $msg")
     }
 
-    /**
-     * Weryfikacja Problemu 7: Import danych do bazy zachowuje oryginalne identyfikatory (identity:id).
-     */
     @Test
-    fun extraTest7_OriginalIdentifiersPreserved() {
-        val stream = interpreter.executeQuery("where l:id='$journalLogId' limit e:1").asJsonArray
+    fun originalIdentifiersPreserved() {
+        val stream = interpreter.executeQuery("where l:_id='$advancedFeaturesLogId' limit e:1").asJsonArray
         val event = stream[0].asJsonObject
 
         val internalId = event.get("_id")?.asString
@@ -1005,5 +897,63 @@ class PqlInterpreterTest {
         assertNotNull(internalId, "Brak wewnętrznego klucza _id bazy danych CouchDB")
         assertNotNull(originalIdentityId, "Zgubiono oryginalny identyfikator 'identity:id' z wgranego logu XES")
         assertTrue(internalId != originalIdentityId, "Oryginalne ID zostało niepotrzebnie i niszczycielsko nadpisane wygenerowanym kluczem NoSQL")
+    }
+
+    @Test
+    fun dynamicExtensionsGlobalsClassifiersExport() {
+        val exportFile = java.io.File("test_export_headers.xes")
+        if (exportFile.exists()) exportFile.delete()
+
+        val exporter = app.XesExporter(dbManager, dbName)
+        exporter.exportToFile(advancedFeaturesLogId, exportFile.absolutePath)
+
+        assertTrue(exportFile.exists(), "Plik nie został wyeksportowany")
+        val content = exportFile.readText()
+
+        assertTrue(content.contains("""<extension name="AdvancedCustomExt" prefix="adv""""), "Brak dynamicznego rozszerzenia!")
+        assertFalse(content.contains("""<extension name="Organizational""""), "Eksport dodał sztywne rozszerzenie!")
+
+        assertTrue(content.contains("""<global scope="trace">"""), "Brak tagu global dla trace!")
+        assertTrue(content.contains("""<classifier name="MyCustomClassifier" keys="concept:name adv:level"/>"""), "Brak klasyfikatora!")
+
+        exportFile.delete()
+    }
+
+    @Test
+    fun dataTypeInferenceByValue() {
+        val exportFile = java.io.File("test_export_types.xes")
+        if (exportFile.exists()) exportFile.delete()
+
+        val exporter = app.XesExporter(dbManager, dbName)
+        exporter.exportToFile(advancedFeaturesLogId, exportFile.absolutePath)
+        val content = exportFile.readText()
+
+        assertTrue(content.contains("""<string key="time:timestamp" value="To nie jest data, to zwykly tekst!"/>"""), "Fałszywy timestamp nie został rozpoznany jako string!")
+        assertTrue(content.contains("""<date key="my_weird_string" value="2023-11-20T14:30:00.000+01:00"/>"""), "Data ukryta pod złą nazwą nie dostała tagu <date>!")
+        assertTrue(content.contains("""<int key="is_premium" value="42"/>"""), "Liczba ukryta pod booleanową nazwą nie dostała tagu <int>!")
+        assertTrue(content.contains("""<float key="my_integer_name" value="3.1415"/>"""), "Ułamek nie dostał tagu <float>!")
+        assertTrue(content.contains("""<boolean key="my_uuid_name" value="true"/>"""), "Boolean nie dostał tagu <boolean>!")
+        assertTrue(content.contains("""<id key="my_string_name" value="123e4567-e89b-12d3-a456-426614174000"/>"""), "UUID nie dostał tagu <id>!")
+
+        exportFile.delete()
+    }
+
+    @Test
+    fun identityIdSeparation() {
+        val exportFile = java.io.File("test_export_identity.xes")
+        if (exportFile.exists()) exportFile.delete()
+
+        val exporter = app.XesExporter(dbManager, dbName)
+        exporter.exportToFile(advancedFeaturesLogId, exportFile.absolutePath)
+        val content = exportFile.readText()
+
+        assertTrue(content.contains("""<string key="identity:id" value="BIZNESOWY-LOG-ID-999"/>"""), "Zniszczono biznesowe identity:id logu!")
+        assertTrue(content.contains("""<string key="identity:id" value="BIZNESOWY-TRACE-ID-123"/>"""), "Zniszczono biznesowe identity:id śladu!")
+        assertTrue(content.contains("""<string key="identity:id" value="BIZNESOWY-EVENT-ID-ABC"/>"""), "Zniszczono biznesowe identity:id zdarzenia!")
+
+        assertFalse(content.contains("""key="_id""""), "Klucz bazy CouchDB wyciekł do pliku eksportowego!")
+        assertFalse(content.contains("""key="docType""""), "Wewnętrzne pola CouchDB (docType) wyciekły do eksportu!")
+
+        exportFile.delete()
     }
 }

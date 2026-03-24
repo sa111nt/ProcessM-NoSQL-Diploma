@@ -32,7 +32,7 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
                 XMLStreamConstants.START_ELEMENT -> {
                     val name = reader.localName
                     if (name == "log") {
-                        nextComponent = XESLogAttributes(parseLogAttributes())
+                        nextComponent = parseLogHeader()
                         return true
                     } else if (name == "trace") {
                         nextComponent = XESTrace(parseTrace())
@@ -54,7 +54,6 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
         throw NoSuchElementException()
     }
 
-    // SPŁASZCZAJĄCA REKURENCJA: Generuje ultra-lekkie klucze dla bazy NoSQL
     private fun parseAttribute(prefix: String = ""): List<Pair<String, Any?>> {
         val tag = reader.localName
         val rawKey = reader.getAttributeValue(null, "key") ?: "unknown"
@@ -80,27 +79,61 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
         return results
     }
 
-    private fun parseLogAttributes(): Map<String, Any?> {
+    private fun parseLogHeader(): XESLogAttributes {
         val attributes = mutableMapOf<String, Any?>()
+        val extensions = mutableListOf<XesExtension>()
+        val globals = mutableListOf<XesGlobal>()
+        val classifiersDef = mutableListOf<XesClassifier>()
+        val classifiersMap = mutableMapOf<String, List<String>>()
+
         while (reader.hasNext()) {
             reader.next()
             if (reader.isStartElement) {
                 val name = reader.localName
-                if (name in primitiveTypes || name == "list" || name == "container") {
+
+                if (name == "extension") {
+                    val extName = reader.getAttributeValue(null, "name") ?: ""
+                    val extPrefix = reader.getAttributeValue(null, "prefix") ?: ""
+                    val extUri = reader.getAttributeValue(null, "uri") ?: ""
+                    extensions.add(XesExtension(extName, extPrefix, extUri))
+                } else if (name == "global") {
+                    val scope = reader.getAttributeValue(null, "scope") ?: ""
+                    val globalAttrs = mutableMapOf<String, Any?>()
+                    var readingGlobal = true
+                    while (reader.hasNext() && readingGlobal) {
+                        reader.next()
+                        if (reader.isStartElement) {
+                            val tag = reader.localName
+                            if (tag in primitiveTypes || tag == "list" || tag == "container") {
+                                parseAttribute().forEach { globalAttrs[it.first] = it.second }
+                            }
+                        } else if (reader.isEndElement && reader.localName == "global") {
+                            readingGlobal = false
+                        }
+                    }
+                    globals.add(XesGlobal(scope, globalAttrs))
+                } else if (name == "classifier") {
+                    val cName = reader.getAttributeValue(null, "name") ?: ""
+                    val cKeys = reader.getAttributeValue(null, "keys") ?: ""
+                    val keysList = cKeys.split(" ", ",").filter { it.isNotBlank() }.map { it.trim('\'', '"') }
+                    classifiersDef.add(XesClassifier(cName, keysList))
+                    classifiersMap[cName] = keysList
+                } else if (name in primitiveTypes || name == "list" || name == "container") {
                     parseAttribute().forEach { attributes[it.first] = it.second }
                 } else if (name == "trace") {
-                    return attributes
+                    return XESLogAttributes(attributes, extensions, globals, classifiersDef, classifiersMap)
                 }
-            } else if (reader.isEndElement && reader.localName == "log") return attributes
+            } else if (reader.isEndElement && reader.localName == "log") {
+                return XESLogAttributes(attributes, extensions, globals, classifiersDef, classifiersMap)
+            }
         }
-        return attributes
+        return XESLogAttributes(attributes, extensions, globals, classifiersDef, classifiersMap)
     }
 
     private fun parseTrace(): Trace {
         val traceAttributes = mutableMapOf<String, Any?>()
         val events = mutableListOf<Event>()
-
-        var currentTraceId = UUID.randomUUID()
+        val currentTraceId = UUID.randomUUID()
 
         while (reader.hasNext()) {
             reader.next()
@@ -109,9 +142,6 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
                 if (name in primitiveTypes || name == "list" || name == "container") {
                     parseAttribute().forEach { attr ->
                         traceAttributes[attr.first] = attr.second
-                        if (attr.first == "identity:id" && attr.second is UUID) {
-                            currentTraceId = attr.second as UUID
-                        }
                     }
                 } else if (name == "event") {
                     events.add(parseEvent(currentTraceId))
@@ -119,12 +149,10 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
             } else if (reader.isEndElement && reader.localName == "trace") break
         }
 
-        val finalizedEvents = events.map { it.copy(traceId = currentTraceId) }.toMutableList()
-
         return Trace(
             id = currentTraceId,
             attributes = traceAttributes,
-            events = finalizedEvents
+            events = events
         )
     }
 
@@ -132,7 +160,6 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
         val attrs = mutableMapOf<String, Any?>()
         var name: String? = null
         var timestamp: String? = null
-        var eventId: UUID? = null
 
         var reading = true
         while (reader.hasNext() && reading) {
@@ -144,7 +171,6 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
                         when (attr.first) {
                             "concept:name" -> name = attr.second?.toString()
                             "time:timestamp" -> timestamp = attr.second?.toString()
-                            "identity:id" -> if (attr.second is UUID) eventId = attr.second as UUID
                         }
                         attrs[attr.first] = attr.second
                     }
@@ -153,7 +179,7 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
         }
 
         return Event(
-            id = eventId ?: UUID.randomUUID(),
+            id = UUID.randomUUID(),
             traceId = traceId,
             name = name,
             timestamp = timestamp,

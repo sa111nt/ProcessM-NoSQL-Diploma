@@ -148,45 +148,9 @@ class PqlToCouchDbTranslator(
         condition: PqlCondition.Simple,
         collectionScope: PqlScope
     ): JsonObject {
-        // Zdejmujemy nawiasy klamrowe (escape) wstrzyknięte przez ucieczkę ANTLR
-        val rawAttr = condition.attribute.removePrefix("[").removeSuffix("]")
-        val cleanAttr = rawAttr.removePrefix("e:").removePrefix("t:").removePrefix("l:")
-        val attrLower = cleanAttr.lowercase()
-
-        var dotPath = fieldMapper.resolve(condition.scope, cleanAttr).toDotPath()
-
-        // 🚨 ODBUDOWA ŚCIEŻEK DLA PŁASKIEJ BAZY NOSQL 🚨
-        if (attrLower == "id" || attrLower == "_id" || attrLower == "identity:id") {
-            dotPath = if (condition.scope == collectionScope) "_id"
-            else if (condition.scope == PqlScope.LOG) "logId"
-            else if (condition.scope == PqlScope.TRACE) "traceId"
-            else "_id"
-        } else if (attrLower == "concept:name" || attrLower == "name") {
-            dotPath = when (condition.scope) {
-                PqlScope.EVENT -> "activity"
-                PqlScope.TRACE -> "xes_attributes.concept:name"
-                PqlScope.LOG -> "log_attributes.concept:name"
-            }
-        } else if (attrLower == "time:timestamp" || attrLower == "timestamp") {
-            dotPath = when (condition.scope) {
-                PqlScope.EVENT -> "timestamp"
-                PqlScope.TRACE -> "xes_attributes.time:timestamp"
-                PqlScope.LOG -> "log_attributes.time:timestamp"
-            }
-        } else if (cleanAttr.count { it == ':' } > 0 || attrLower.contains("meta_")) {
-            // Omijamy destrukcyjne działanie fieldMappera na zagnieżdżonych, spłaszczonych kluczach ZACHOWUJĄC WIELKOŚĆ LITER
-            dotPath = when (condition.scope) {
-                PqlScope.LOG -> "log_attributes.$cleanAttr"
-                PqlScope.TRACE -> "xes_attributes.$cleanAttr"
-                PqlScope.EVENT -> "xes_attributes.$cleanAttr"
-            }
-        } else if (condition.scope != collectionScope) {
-            val scopePrefix = when (condition.scope) { PqlScope.EVENT -> "e:"; PqlScope.TRACE -> "t:"; PqlScope.LOG -> "l:" }
-            dotPath = scopePrefix + cleanAttr
-        }
+        val dotPath = fieldMapper.resolveForCondition(condition.scope, collectionScope, condition.attribute).toDotPath()
 
         val conditionObject = JsonObject()
-
         val strVal = condition.value as? String
         val numVal = strVal?.toDoubleOrNull()
 
@@ -216,7 +180,7 @@ class PqlToCouchDbTranslator(
             PqlOperator.GT -> conditionObject.add("\$gt", convertValue(numVal ?: condition.value))
             PqlOperator.GE -> conditionObject.add("\$gte", convertValue(numVal ?: condition.value))
             PqlOperator.IN -> {
-                val values = condition.value as? List<*> ?: error("IN operator requires a list of values")
+                val values = condition.value as? List<*> ?: error("")
                 conditionObject.add("\$in", JsonArray().apply {
                     values.forEach {
                         val vStr = it as? String
@@ -227,7 +191,7 @@ class PqlToCouchDbTranslator(
                 })
             }
             PqlOperator.NOT_IN -> {
-                val values = condition.value as? List<*> ?: error("NOT IN operator requires a list of values")
+                val values = condition.value as? List<*> ?: error("")
                 conditionObject.add("\$nin", JsonArray().apply {
                     values.forEach {
                         val vStr = it as? String
@@ -238,12 +202,12 @@ class PqlToCouchDbTranslator(
                 })
             }
             PqlOperator.LIKE -> {
-                val pattern = condition.value as? String ?: error("LIKE operator requires a string pattern")
+                val pattern = condition.value as? String ?: error("")
                 val regexPattern = pattern.replace(".", "\\.").replace("%", ".*").replace("_", ".")
                 conditionObject.addProperty("\$regex", regexPattern)
             }
             PqlOperator.MATCHES -> {
-                val pattern = condition.value as? String ?: error("MATCHES operator requires a string pattern")
+                val pattern = condition.value as? String ?: error("")
                 conditionObject.addProperty("\$regex", pattern)
             }
             PqlOperator.IS_NULL -> conditionObject.addProperty("\$exists", false)

@@ -14,7 +14,7 @@ class PqlEvaluationTest {
     private lateinit var dbManager: CouchDBManager
     private lateinit var interpreter: PqlInterpreter
     private val dbName = "pql_evaluation_test_db"
-    private val testXesPath = "src/test/resources/eval_test.xes"
+    private val testXesPath = "src/test/resources/pql_evaluation_log.xes"
 
     @BeforeAll
     fun setup() {

@@ -36,13 +36,45 @@ class XesExporter(private val dbManager: CouchDBManager, private val dbName: Str
         file.bufferedWriter().use { writer ->
             writer.write("""<?xml version="1.0" encoding="UTF-8"?>""" + "\n")
             writer.write("""<log xes.version="1.0" xmlns="http://www.xes-standard.org/">""" + "\n")
-            writer.write("""  <extension name="Concept" prefix="concept" uri="http://www.xes-standard.org/concept.xesext"/>""" + "\n")
-            writer.write("""  <extension name="Time" prefix="time" uri="http://www.xes-standard.org/time.xesext"/>""" + "\n")
-            writer.write("""  <extension name="Organizational" prefix="org" uri="http://www.xes-standard.org/org.xesext"/>""" + "\n")
-            writer.write("""  <extension name="Identity" prefix="identity" uri="http://www.xes-standard.org/identity.xesext"/>""" + "\n")
 
             if (logDocs.size() > 0) {
-                writeAttributes(writer, logDocs[0].asJsonObject, 2)
+                val logObj = logDocs[0].asJsonObject
+
+                if (logObj.has("extensions") && logObj.get("extensions").isJsonArray) {
+                    val exts = logObj.getAsJsonArray("extensions")
+                    for (i in 0 until exts.size()) {
+                        val ext = exts[i].asJsonObject
+                        val extName = escapeXml(ext.get("name")?.asString ?: "")
+                        val extPrefix = escapeXml(ext.get("prefix")?.asString ?: "")
+                        val extUri = escapeXml(ext.get("uri")?.asString ?: "")
+                        writer.write("""  <extension name="$extName" prefix="$extPrefix" uri="$extUri"/>""" + "\n")
+                    }
+                }
+
+                if (logObj.has("globals") && logObj.get("globals").isJsonArray) {
+                    val globals = logObj.getAsJsonArray("globals")
+                    for (i in 0 until globals.size()) {
+                        val g = globals[i].asJsonObject
+                        val scope = escapeXml(g.get("scope")?.asString ?: "")
+                        writer.write("  <global scope=\"$scope\">\n")
+                        if (g.has("attributes")) {
+                            writeAttributes(writer, g.getAsJsonObject("attributes"), 4)
+                        }
+                        writer.write("  </global>\n")
+                    }
+                }
+
+                if (logObj.has("classifiers") && logObj.get("classifiers").isJsonArray) {
+                    val classifiers = logObj.getAsJsonArray("classifiers")
+                    for (i in 0 until classifiers.size()) {
+                        val c = classifiers[i].asJsonObject
+                        val cName = escapeXml(c.get("name")?.asString ?: "")
+                        val cKeys = escapeXml(c.get("keys")?.asString ?: "")
+                        writer.write("""  <classifier name="$cName" keys="$cKeys"/>""" + "\n")
+                    }
+                }
+
+                writeAttributes(writer, logObj, 2)
             }
 
             for (i in 0 until traces.size()) {
@@ -73,7 +105,6 @@ class XesExporter(private val dbManager: CouchDBManager, private val dbName: Str
     private fun writeAttributes(writer: Writer, jsonObject: JsonObject, indentLevel: Int) {
         val indent = " ".repeat(indentLevel)
 
-        // POPRAWKA: Eksporter obsługuje teraz klucz "attributes" wygenerowany przez nasz Mapper
         val targetObj = when {
             jsonObject.has("log_attributes") && !jsonObject.get("log_attributes").isJsonNull -> jsonObject.getAsJsonObject("log_attributes")
             jsonObject.has("attributes") && !jsonObject.get("attributes").isJsonNull -> jsonObject.getAsJsonObject("attributes")
@@ -92,7 +123,9 @@ class XesExporter(private val dbManager: CouchDBManager, private val dbName: Str
         if (jsonObject.has("source") && !jsonObject.get("source").isJsonNull) combinedAttributes.add("source", jsonObject.get("source"))
 
         for ((key, element) in combinedAttributes.entrySet()) {
+            // Ignorujemy wstrzyknięte klucze bazy NoSQL
             if (key.startsWith("_") || key == "docType" || key == "logId" || key == "traceId" || key == "eventIndex" || key == "originalTraceId") continue
+            if (key == "extensions" || key == "globals" || key == "classifiers" || key == "importTimestamp") continue
             if (element.isJsonNull) continue
 
             val primitive = if (element.isJsonPrimitive) element.asJsonPrimitive else continue
@@ -100,16 +133,19 @@ class XesExporter(private val dbManager: CouchDBManager, private val dbName: Str
             val safeValue = escapeXml(valueStr)
 
             val tag = when {
-                key == "identity:id" -> "id"
-                key == "time:timestamp" || valueStr.matches(Regex("""^\d{4}-\d{2}-\d{2}T.*""")) -> "date"
-                primitive.isNumber && valueStr.contains(".") -> "float"
-                primitive.isNumber -> "int"
                 primitive.isBoolean -> "boolean"
+                primitive.isNumber -> if (valueStr.contains(".") || valueStr.contains("e") || valueStr.contains("E")) "float" else "int"
                 else -> {
-                    try {
+                    val isUuid = try {
                         java.util.UUID.fromString(valueStr)
+                        true
+                    } catch (e: Exception) { false }
+
+                    if (isUuid) {
                         "id"
-                    } catch (e: Exception) {
+                    } else if (valueStr.matches(Regex("""^\d{4}-\d{2}-\d{2}T.*"""))) {
+                        "date"
+                    } else {
                         "string"
                     }
                 }

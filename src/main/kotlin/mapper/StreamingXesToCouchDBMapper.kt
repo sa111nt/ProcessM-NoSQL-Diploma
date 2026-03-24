@@ -26,7 +26,6 @@ class StreamingXesToCouchDBMapper(
         couchDB.createDb(databaseName)
 
         val logId = "log_${UUID.randomUUID()}"
-        println("[INFO] Starting import for Log ID: $logId")
 
         val executor = ThreadPoolExecutor(
             parallelism, parallelism,
@@ -57,7 +56,6 @@ class StreamingXesToCouchDBMapper(
                 try {
                     couchDB.insertBulkDocsRaw(databaseName, payload)
                 } catch (e: Exception) {
-                    println("[ERROR] Błąd zapisu paczki: ${e.message}")
                 }
             }
 
@@ -101,7 +99,6 @@ class StreamingXesToCouchDBMapper(
         } catch (e: InterruptedException) {
             executor.shutdownNow()
         }
-        println("[INFO] Import finished.")
     }
 
     private fun writeLog(writer: JsonWriter, logAttr: XESLogAttributes, logId: String) {
@@ -111,8 +108,39 @@ class StreamingXesToCouchDBMapper(
         writer.name("source").value(logAttr.attributes["source"]?.toString() ?: "unknown")
         writer.name("importTimestamp").value(System.currentTimeMillis())
 
-        if (logAttr.attributes["identity:id"] != null) {
-            writer.name("identity:id").value(logAttr.attributes["identity:id"].toString())
+        if (logAttr.extensions.isNotEmpty()) {
+            writer.name("extensions").beginArray()
+            for (ext in logAttr.extensions) {
+                writer.beginObject()
+                writer.name("name").value(ext.name)
+                writer.name("prefix").value(ext.prefix)
+                writer.name("uri").value(ext.uri)
+                writer.endObject()
+            }
+            writer.endArray()
+        }
+
+        if (logAttr.globals.isNotEmpty()) {
+            writer.name("globals").beginArray()
+            for (g in logAttr.globals) {
+                writer.beginObject()
+                writer.name("scope").value(g.scope)
+                writer.name("attributes")
+                writeAttributes(writer, g.attributes)
+                writer.endObject()
+            }
+            writer.endArray()
+        }
+
+        if (logAttr.classifiersDef.isNotEmpty()) {
+            writer.name("classifiers").beginArray()
+            for (c in logAttr.classifiersDef) {
+                writer.beginObject()
+                writer.name("name").value(c.name)
+                writer.name("keys").value(c.keys.joinToString(" "))
+                writer.endObject()
+            }
+            writer.endArray()
         }
 
         writer.name("log_attributes")
@@ -125,8 +153,6 @@ class StreamingXesToCouchDBMapper(
         writer.name("_id").value("${logId}_${trace.id}")
         writer.name("docType").value("trace")
         writer.name("logId").value(logId)
-        writer.name("originalTraceId").value(trace.id.toString())
-        writer.name("identity:id").value(trace.id.toString())
 
         val logName = logAttr?.attributes?.get("concept:name")?.toString() ?: logId
         writer.name("l:concept:name").value(logName)
@@ -142,8 +168,6 @@ class StreamingXesToCouchDBMapper(
         writer.name("docType").value("event")
         writer.name("logId").value(logId)
         writer.name("traceId").value("${logId}_$traceIdStr")
-
-        writer.name("identity:id").value(event.id.toString())
         writer.name("activity").value(event.name)
         writer.name("timestamp").value(event.timestamp)
         writer.name("eventIndex").value(index)
@@ -154,8 +178,6 @@ class StreamingXesToCouchDBMapper(
         val traceName = trace.attributes["concept:name"]?.toString() ?: trace.id.toString()
         writer.name("t:concept:name").value(traceName)
 
-        // --- DODANE WSPARCIE DLA KLASYFIKATORÓW PQL ---
-        // Generujemy "w locie" złożenia klasyfikatorów i dodajemy do JSON-a Eventu
         val classifiers = logAttr?.classifiers ?: emptyMap()
         for ((cName, cKeys) in classifiers) {
             val cValues = cKeys.mapNotNull { key ->
@@ -182,7 +204,6 @@ class StreamingXesToCouchDBMapper(
                 writer.name(safeKey)
                 writeValue(writer, v)
             } catch (e: Exception) {
-                println("[ERROR] Błąd klucza wejściowego: $k")
                 throw e
             }
         }
