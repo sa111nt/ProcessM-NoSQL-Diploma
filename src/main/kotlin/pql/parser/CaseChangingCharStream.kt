@@ -3,18 +3,13 @@ package pql.parser
 import org.antlr.v4.runtime.CharStream
 import org.antlr.v4.runtime.misc.Interval
 
-/**
- * Wrapper na CharStream, który zamienia wszystkie znaki na małe litery (Upper Case -> Lower Case)
- * w locie. Pozwala to używać gramatyki Case-Sensitive (np. wymagającej 'select')
- * z zapytaniami Case-Insensitive (np. 'SELECT').
- */
 class CaseChangingCharStream(
     private val stream: CharStream,
     private val upper: Boolean
 ) : CharStream {
 
     override fun getText(interval: Interval): String {
-        return stream.getText(interval) // Zwracamy oryginał (żeby stringi 'A' nie zamieniły się na 'a')
+        return stream.getText(interval)
     }
 
     override fun consume() {
@@ -26,7 +21,6 @@ class CaseChangingCharStream(
         if (c <= 0) {
             return c
         }
-        // Jeśli upper=false, zamieniamy na małe litery
         if (!upper) {
             return Character.toLowerCase(c)
         }

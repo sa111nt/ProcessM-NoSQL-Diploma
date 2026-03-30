@@ -16,14 +16,32 @@ import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
 
 private fun JsonObject.addComputedProperty(rawKey: String, value: Any?) {
-    if (value == null) return
+    val xes = this.getAsJsonObject("xes_attributes")
+    val types = xes?.getAsJsonObject("_types")
+
+    if (value == null) {
+        this.add(rawKey, com.google.gson.JsonNull.INSTANCE)
+        return
+    }
+
     when (value) {
-        is Long, is Int, is Short, is Byte -> this.addProperty(rawKey, value as Number)
-        is Double -> if (value % 1 == 0.0) this.addProperty(rawKey, value.toLong()) else this.addProperty(rawKey, value)
-        is Float -> if (value % 1 == 0.0f) this.addProperty(rawKey, value.toLong()) else this.addProperty(rawKey, value)
-        is Number -> this.addProperty(rawKey, value)
-        is Boolean -> this.addProperty(rawKey, value)
-        else -> this.addProperty(rawKey, value.toString())
+        is Long, is Int, is Short, is Byte -> {
+            this.addProperty(rawKey, value as Number)
+            types?.addProperty(rawKey, "int[$rawKey]")
+        }
+        is Double, is Float -> {
+            val num = value as Number
+            if (num.toDouble() % 1 == 0.0) this.addProperty(rawKey, num.toLong()) else this.addProperty(rawKey, num)
+            types?.addProperty(rawKey, "float[$rawKey]")
+        }
+        is Boolean -> {
+            this.addProperty(rawKey, value as Boolean)
+            types?.addProperty(rawKey, "boolean[$rawKey]")
+        }
+        else -> {
+            this.addProperty(rawKey, value.toString())
+            types?.addProperty(rawKey, "string[$rawKey]")
+        }
     }
 }
 
@@ -58,11 +76,10 @@ class PqlQueryExecutor(
         }
 
         fun extractRobustValue(doc: JsonObject, scope: PqlScope, attribute: String): Any? {
+            val isLiteral = attribute.startsWith("[") && attribute.endsWith("]")
             val resolvedAttribute = fieldMapper.getStandardName(attribute)
-            val cleanAttrOriginal = resolvedAttribute.removePrefix("^^").removePrefix("^").removePrefix("[").removeSuffix("]")
+            val cleanAttrOriginal = resolvedAttribute.removePrefix("[").removeSuffix("]").removePrefix("^^").removePrefix("^")
             val cleanAttrLower = cleanAttrOriginal.lowercase()
-
-            val mappedAttr = fieldMapper.getStandardName(cleanAttrLower)
 
             val docType = doc.get("docType")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: "event"
             val docLevel = when(docType) { "log" -> 1; "trace" -> 2; else -> 3 }
@@ -72,38 +89,68 @@ class PqlQueryExecutor(
                 val injectedKey = when(scope) { PqlScope.TRACE -> "t:"; PqlScope.LOG -> "l:"; else -> "" } + cleanAttrOriginal
                 if (doc.has(injectedKey)) {
                     val v = doc.get(injectedKey)
-                    return if (v.isJsonPrimitive && v.asJsonPrimitive.isNumber) v.asDouble else if (!v.isJsonNull) v.asString?.intern() else null
+                    if (!v.isJsonNull) {
+                        if (v.isJsonPrimitive) {
+                            val prim = v.asJsonPrimitive
+                            return when {
+                                prim.isNumber -> prim.asDouble
+                                prim.isBoolean -> prim.asBoolean
+                                else -> prim.asString.intern()
+                            }
+                        }
+                        return v.toString().intern()
+                    }
                 }
                 if (scope == PqlScope.TRACE) {
-                    if (cleanAttrLower == "name" || cleanAttrLower == "concept:name") return doc.get("t:concept:name")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.get("t:name")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.get("traceId")?.takeIf { !it.isJsonNull }?.asString?.substringAfterLast("_")?.intern()
+                    if (cleanAttrLower == "name" || cleanAttrLower == "concept:name") return doc.get("t:concept:name")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.get("t:name")?.takeIf { !it.isJsonNull }?.asString?.intern()
                 } else if (scope == PqlScope.LOG) {
-                    if (cleanAttrLower == "name" || cleanAttrLower == "concept:name") return doc.get("l:concept:name")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.get("l:name")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.get("logId")?.takeIf { !it.isJsonNull }?.asString?.intern()
+                    if (cleanAttrLower == "name" || cleanAttrLower == "concept:name") return doc.get("l:concept:name")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.get("l:name")?.takeIf { !it.isJsonNull }?.asString?.intern()
                 }
                 return null
             }
 
-            val classifierKey = if (cleanAttrOriginal.startsWith("classifier:")) "c:" + cleanAttrOriginal.removePrefix("classifier:")
-            else if (cleanAttrOriginal.startsWith("e:c:")) "c:" + cleanAttrOriginal.removePrefix("e:c:")
-            else if (cleanAttrOriginal.startsWith("c:")) cleanAttrOriginal
-            else null
-
-            if (classifierKey != null && doc.has(classifierKey)) {
-                return doc.get(classifierKey).asString.intern()
+            val classifierKey = when {
+                cleanAttrOriginal.startsWith("e:classifier:") -> "c:" + cleanAttrOriginal.removePrefix("e:classifier:")
+                cleanAttrOriginal.startsWith("t:classifier:") -> "c:" + cleanAttrOriginal.removePrefix("t:classifier:")
+                cleanAttrOriginal.startsWith("l:classifier:") -> "c:" + cleanAttrOriginal.removePrefix("l:classifier:")
+                cleanAttrOriginal.startsWith("classifier:") -> "c:" + cleanAttrOriginal.removePrefix("classifier:")
+                cleanAttrOriginal.startsWith("e:c:") -> "c:" + cleanAttrOriginal.removePrefix("e:c:")
+                cleanAttrOriginal.startsWith("t:c:") -> "c:" + cleanAttrOriginal.removePrefix("t:c:")
+                cleanAttrOriginal.startsWith("l:c:") -> "c:" + cleanAttrOriginal.removePrefix("l:c:")
+                cleanAttrOriginal.startsWith("c:") -> cleanAttrOriginal
+                else -> null
             }
 
-            val baseAttr = cleanAttrOriginal.removePrefix("e:c:").removePrefix("c:").removePrefix("classifier:")
-            val isClassifier = cleanAttrOriginal.startsWith("c:") || cleanAttrOriginal.startsWith("classifier:") || cleanAttrOriginal.startsWith("e:c:") || cleanAttrOriginal.startsWith("t:c:") || cleanAttrOriginal.startsWith("l:c:")
+            if (classifierKey != null) {
+                val baseName = classifierKey.removePrefix("c:")
+                val mappedKeys = fieldMapper.getImplicitClassifierMapping(baseName)
+                val actualClassifierKey = if (mappedKeys.isNotEmpty()) "c:" + mappedKeys.joinToString("+") else classifierKey
 
-            if (isClassifier) {
-                val mappedFields = fieldMapper.getImplicitClassifierMapping(baseAttr)
-                val vals = mappedFields.map { part ->
-                    val resolved = extractRobustValue(doc, scope, part)?.toString() ?: ""
-                    if (resolved == "null" || resolved.isEmpty()) "" else resolved
-                }.filter { it.isNotEmpty() }
-                if (vals.isNotEmpty()) return vals.joinToString("+").intern()
+                if (doc.has(actualClassifierKey)) {
+                    return doc.get(actualClassifierKey).asString.intern()
+                }
+                if (doc.has(classifierKey)) {
+                    return doc.get(classifierKey).asString.intern()
+                }
+
+                val keysToCombine = if (mappedKeys.isNotEmpty()) {
+                    mappedKeys
+                } else if (baseName.contains("+")) {
+                    baseName.split("+")
+                } else {
+                    emptyList()
+                }
+
+                if (keysToCombine.isNotEmpty()) {
+                    val parts = keysToCombine.mapNotNull { k -> extractRobustValue(doc, scope, k)?.toString()?.takeIf { it.isNotBlank() && it != "null" } }
+                    if (parts.isNotEmpty()) {
+                        return parts.joinToString("+").intern()
+                    }
+                }
             }
 
-            val segments = fieldMapper.resolve(scope, cleanAttrOriginal).segments
+            val segments = fieldMapper.resolve(scope, if (isLiteral) resolvedAttribute else cleanAttrOriginal).segments
+
             var current: com.google.gson.JsonElement? = doc
             for (segment in segments) {
                 if (current == null || !current.isJsonObject) { current = null; break }
@@ -128,36 +175,22 @@ class PqlQueryExecutor(
                 } else current.toString().intern()
             }
 
-            val attrContainer = when (docType) {
-                "log" -> doc.getAsJsonObject("log_attributes") ?: doc
-                "trace", "event" -> doc.getAsJsonObject("xes_attributes") ?: doc
-                else -> doc
-            }
+            if (!isLiteral) {
+                val attrContainer = when (docType) {
+                    "log" -> doc.getAsJsonObject("log_attributes") ?: doc
+                    "trace", "event" -> doc.getAsJsonObject("xes_attributes") ?: doc
+                    else -> doc
+                }
 
-            if (attrContainer.has(mappedAttr)) {
-                val exactVal = attrContainer.get(mappedAttr)
-                if (!exactVal.isJsonNull) {
-                    return if (exactVal.isJsonPrimitive) {
-                        val prim = exactVal.asJsonPrimitive
-                        if (prim.isNumber) prim.asDouble else if (prim.isBoolean) prim.asBoolean else prim.asString.intern()
-                    } else exactVal.toString().intern()
+                if (scope == PqlScope.EVENT) {
+                    if (cleanAttrLower == "name" || cleanAttrLower == "concept:name" || cleanAttrLower == "activity") return doc.get("activity")?.takeIf { !it.isJsonNull }?.asString?.intern()
+                    if (cleanAttrLower.contains("timestamp")) {
+                        return doc.get("timestamp")?.takeIf { !it.isJsonNull }?.asString?.intern()
+                            ?: doc.getAsJsonObject("xes_attributes")?.get("time:timestamp")?.takeIf { !it.isJsonNull }?.asString?.intern()
+                    }
                 }
             }
 
-            val manualNested = resolveNested(attrContainer, mappedAttr)
-            if (manualNested != null && !manualNested.isJsonNull) {
-                return if (manualNested.isJsonPrimitive) {
-                    if (manualNested.asJsonPrimitive.isNumber) manualNested.asDouble else if (manualNested.asJsonPrimitive.isBoolean) manualNested.asBoolean else manualNested.asString.intern()
-                } else manualNested.toString().intern()
-            }
-
-            if (scope == PqlScope.EVENT) {
-                if (cleanAttrLower == "name" || cleanAttrLower == "concept:name" || cleanAttrLower == "activity") return doc.get("activity")?.takeIf { !it.isJsonNull }?.asString?.intern()
-                if (cleanAttrLower.contains("timestamp")) {
-                    val ts = doc.get("timestamp")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: doc.getAsJsonObject("xes_attributes")?.get("time:timestamp")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: ""
-                    if (ts.isNotEmpty()) return ts
-                }
-            }
             return null
         }
     }
@@ -173,26 +206,43 @@ class PqlQueryExecutor(
         return null
     }
 
-    private fun resolveCrossScopeConditions(conditions: List<PqlCondition>, collectionScope: PqlScope): List<String> {
-        val outerScope = conditions.firstNotNullOfOrNull { getCrossScope(it, collectionScope) } ?: return emptyList()
+    private fun resolveAllCrossScopeConditions(crossConditions: List<PqlCondition>, targetScope: PqlScope): List<PqlCondition>? {
+        val conditionsByScope = crossConditions.groupBy { getCrossScope(it, targetScope)!! }
+        val generatedIdConditions = mutableListOf<PqlCondition>()
 
-        val outerQuery = PqlQuery(
-            collection = outerScope,
-            projections = emptyList(),
-            conditions = emptyList(),
-            selectAll = true
-        )
-        val outerCouchQuery = translator.translate(outerQuery)
-        outerCouchQuery.addProperty("limit", 100000)
+        for ((scope, scopeConds) in conditionsByScope) {
+            val outerQuery = PqlQuery(
+                collection = scope,
+                projections = emptyList(),
+                conditions = emptyList(),
+                selectAll = true
+            )
+            val outerCouchQuery = translator.translate(outerQuery)
+            outerCouchQuery.addProperty("limit", 100000)
 
-        val parentIds = mutableListOf<String>()
-        dbManager.findDocsStream(dbName, outerCouchQuery) { doc ->
-            if (conditions.all { evaluateConditionInMemory(doc, it, outerScope) }) {
-                doc.get("_id")?.takeIf { !it.isJsonNull }?.asString?.let { parentIds.add(it) }
+            val validIds = mutableListOf<String>()
+            dbManager.findDocsStream(dbName, outerCouchQuery) { doc ->
+                if (scopeConds.all { evaluateConditionInMemory(doc, it, scope) }) {
+                    doc.get("_id")?.takeIf { !it.isJsonNull }?.asString?.let { validIds.add(it.intern()) }
+                }
+            }
+
+            if (validIds.isEmpty()) return null
+
+            val filterField = when {
+                targetScope == PqlScope.EVENT && scope == PqlScope.TRACE -> "traceId"
+                targetScope == PqlScope.EVENT && scope == PqlScope.LOG -> "logId"
+                targetScope == PqlScope.TRACE && scope == PqlScope.LOG -> "logId"
+                else -> "traceId"
+            }
+
+            if (validIds.size == 1) {
+                generatedIdConditions.add(PqlCondition.Simple(targetScope, filterField, pql.model.PqlOperator.EQ, validIds.first()))
+            } else {
+                generatedIdConditions.add(PqlCondition.Simple(targetScope, filterField, pql.model.PqlOperator.IN, validIds.distinct()))
             }
         }
-
-        return parentIds.distinct()
+        return generatedIdConditions
     }
 
     private fun hasAggregation(projection: pql.model.PqlProjection): Boolean {
@@ -331,7 +381,7 @@ class PqlQueryExecutor(
         val checkFields = query.orderBy.map { it.scope to it.attribute } + query.groupBy.map { it.scope to it.attribute }
         for ((scope, attr) in checkFields) {
             val resolvedAttr = fieldMapper.getStandardName(attr)
-            val cleanAttr = resolvedAttr.removePrefix("^^").removePrefix("^")
+            val cleanAttr = resolvedAttr.removePrefix("[").removeSuffix("]").removePrefix("^^").removePrefix("^")
 
             if (cleanAttr.isEmpty() || cleanAttr.lowercase().matches(Regex(".*(count|min|max|avg|sum)\\(.*\\)"))) continue
 
@@ -355,6 +405,19 @@ class PqlQueryExecutor(
         }
     }
 
+    private fun hasClassifier(c: PqlCondition): Boolean {
+        return when (c) {
+            is PqlCondition.Simple -> {
+                val attr = c.attribute.lowercase()
+                attr.startsWith("c:") || attr.startsWith("e:c:") || attr.startsWith("[c:") || attr.startsWith("[e:c:") || attr.contains("classifier")
+            }
+            is PqlCondition.And -> c.conditions.any { hasClassifier(it) }
+            is PqlCondition.Or -> c.conditions.any { hasClassifier(it) }
+            is PqlCondition.Not -> hasClassifier(c.condition)
+            else -> false
+        }
+    }
+
     fun executeDelete(query: PqlDeleteQuery): JsonObject {
         try {
             if (query.conditions.any { it is PqlCondition.AlwaysFalse }) {
@@ -374,23 +437,12 @@ class PqlQueryExecutor(
             var resolvedQuery = query.copy(conditions = sameScopeConditions)
 
             if (crossScopeConditions.isNotEmpty()) {
-                val parentIds = resolveCrossScopeConditions(crossScopeConditions, targetScope)
-                if (parentIds.isEmpty()) return JsonObject().apply { addProperty("deleted", 0) }
-
-                val outerScope = crossScopeConditions.firstNotNullOfOrNull { getCrossScope(it, targetScope) }
-                val filterField = when {
-                    targetScope == PqlScope.EVENT && outerScope == PqlScope.TRACE -> "traceId"
-                    targetScope == PqlScope.EVENT && outerScope == PqlScope.LOG -> "logId"
-                    targetScope == PqlScope.TRACE && outerScope == PqlScope.LOG -> "logId"
-                    else -> "traceId"
-                }
-
-                val idCondition = if (parentIds.size == 1) PqlCondition.Simple(targetScope, filterField, pql.model.PqlOperator.EQ, parentIds.first())
-                else PqlCondition.Simple(targetScope, filterField, pql.model.PqlOperator.IN, parentIds)
-                resolvedQuery = query.copy(conditions = sameScopeConditions + idCondition)
+                val newIdConditions = resolveAllCrossScopeConditions(crossScopeConditions, targetScope)
+                if (newIdConditions == null) return JsonObject().apply { addProperty("deleted", 0) }
+                resolvedQuery = query.copy(conditions = sameScopeConditions + newIdConditions)
             }
 
-            val safeConditions = resolvedQuery.conditions.filter { !it.toString().contains("[") }
+            val safeConditions = resolvedQuery.conditions.filter { !hasClassifier(it) }
             val mangoQuery: JsonObject = translator.translateDelete(resolvedQuery.copy(conditions = safeConditions))
 
             val hasCrossScopeOrderBy = resolvedQuery.orderBy.any { it.scope != targetScope }
@@ -528,20 +580,9 @@ class PqlQueryExecutor(
             var resolvedQuery = query.copy(conditions = sameScopeConditions)
 
             if (crossScopeConditions.isNotEmpty()) {
-                val parentIds = resolveCrossScopeConditions(crossScopeConditions, query.collection)
-                if (parentIds.isEmpty()) return JsonArray()
-
-                val outerScope = crossScopeConditions.firstNotNullOfOrNull { getCrossScope(it, query.collection) }
-                val filterField = when {
-                    query.collection == PqlScope.EVENT && outerScope == PqlScope.TRACE -> "traceId"
-                    query.collection == PqlScope.EVENT && outerScope == PqlScope.LOG -> "logId"
-                    query.collection == PqlScope.TRACE && outerScope == PqlScope.LOG -> "logId"
-                    else -> "traceId"
-                }
-
-                val idCondition = if (parentIds.size == 1) PqlCondition.Simple(query.collection, filterField, pql.model.PqlOperator.EQ, parentIds.first())
-                else PqlCondition.Simple(query.collection, filterField, pql.model.PqlOperator.IN, parentIds)
-                resolvedQuery = query.copy(conditions = sameScopeConditions + idCondition)
+                val newIdConditions = resolveAllCrossScopeConditions(crossScopeConditions, query.collection)
+                if (newIdConditions == null) return JsonArray()
+                resolvedQuery = query.copy(conditions = sameScopeConditions + newIdConditions)
             }
 
             val hasAggs = resolvedQuery.projections.any { hasAggregation(it) } || resolvedQuery.orderBy.any { hasAggregation(it) }
@@ -550,7 +591,7 @@ class PqlQueryExecutor(
 
             var rawResultList: List<JsonObject> = emptyList()
 
-            val safeConditions = resolvedQuery.conditions.filter { !it.toString().contains("[") }
+            val safeConditions = resolvedQuery.conditions.filter { !hasClassifier(it) }
             val mangoQuery: JsonObject = translator.translate(resolvedQuery.copy(conditions = safeConditions))
 
             val hasScopedLimitsOrOffsets = resolvedQuery.limits.isNotEmpty() || resolvedQuery.offsets.isNotEmpty()
@@ -583,7 +624,7 @@ class PqlQueryExecutor(
                 validateFields(rawResultList, resolvedQuery, parentsMap)
             }
 
-            if (resolvedQuery.projections.any { it.arithmeticExpression != null || (it.function != null && it.function !is pql.model.PqlFunction.AggregationFunction) || (it.function == null && it.arithmeticExpression == null && it.raw.matches(Regex(".*[\\+\\-\\*/].*")) && !it.raw.contains("http")) }) {
+            if (resolvedQuery.projections.any { it.arithmeticExpression != null || (it.function != null && it.function !is pql.model.PqlFunction.AggregationFunction) || (it.function == null && it.arithmeticExpression == null && it.raw.matches(Regex(".*[\\+\\-\\*/].*")) && !it.raw.contains("http")) || (it.function == null && it.arithmeticExpression == null && it.raw.startsWith("[") && it.raw.endsWith("]")) }) {
                 rawResultList = applyArithmeticExpressions(rawResultList, resolvedQuery)
             }
 
@@ -615,9 +656,12 @@ class PqlQueryExecutor(
         for (doc in rawDocs) {
             query.projections.forEach { proj ->
                 val isMathStr = proj.function == null && proj.arithmeticExpression == null && proj.raw.matches(Regex(".*[\\+\\-\\*/].*")) && !proj.raw.contains("http")
-                if (proj.arithmeticExpression != null || (proj.function != null && proj.function !is pql.model.PqlFunction.AggregationFunction) || isMathStr) {
+                val isLiteral = proj.function == null && proj.arithmeticExpression == null && proj.raw.startsWith("[") && proj.raw.endsWith("]")
+
+                if (proj.arithmeticExpression != null || (proj.function != null && proj.function !is pql.model.PqlFunction.AggregationFunction) || isMathStr || isLiteral) {
                     val value = if (proj.arithmeticExpression != null) evaluateMath(listOf(doc), proj.arithmeticExpression!!, emptyMap(), emptyMap())
                     else if (proj.function != null) evaluateFunction(listOf(doc), proj.function!!, emptyMap(), emptyMap())
+                    else if (isLiteral) extractRobustValue(doc, proj.scope ?: PqlScope.EVENT, proj.attribute ?: proj.raw)
                     else evaluateSimpleMathString(doc, proj.scope ?: PqlScope.EVENT, proj.raw)
                     doc.addComputedProperty(proj.raw, value)
                 }
@@ -650,8 +694,7 @@ class PqlQueryExecutor(
                 val finalValA = numA ?: valA
                 val finalValB = numB ?: valB
 
-                cmp = compareExtractedValues(finalValA, finalValB)
-                if (order.direction == SortDirection.DESC) cmp = -cmp
+                cmp = compareExtractedValues(finalValA, finalValB, order.direction)
                 if (cmp != 0) break
             }
             cmp
@@ -797,8 +840,13 @@ class PqlQueryExecutor(
     }
 
     private fun formatGroupedResponse(docs: JsonArray, query: PqlQuery, parentsMap: Map<String, JsonObject>): JsonArray {
-        val hoistedEventGroupField = query.groupBy.firstOrNull { it.attribute.startsWith("^") && !it.attribute.startsWith("^^") }
-        val isImplicitGlobal = query.groupBy.isEmpty() && query.projections.any { hasAggregation(it) } && !query.projections.any { it.function is pql.model.PqlFunction.AggregationFunction && it.function.attribute?.startsWith("^^") == true }
+        val hoistedEventGroupField = query.groupBy.firstOrNull {
+            val attr = it.attribute.removePrefix("[")
+            attr.startsWith("^") && !attr.startsWith("^^")
+        }
+        val isImplicitGlobal = query.groupBy.isEmpty() && query.projections.any { hasAggregation(it) } && !query.projections.any {
+            it.function is pql.model.PqlFunction.AggregationFunction && it.function.attribute?.removePrefix("[")?.startsWith("^^") == true
+        }
 
         if (isImplicitGlobal) return formatSingleGlobalGroup(docs, query)
 
@@ -866,32 +914,47 @@ class PqlQueryExecutor(
         val logDocsMap = mutableMapOf<String, JsonObject>()
         fetchDocsByIdsChunked(logIds).forEach { logDocsMap[it.get("_id").asString] = it }
 
+        val unaggregatedProjections = query.projections.filter { !hasAggregation(it) && !it.allAttributes }
+        val effectiveGroupBy = query.groupBy.toMutableList()
+
+        if (effectiveGroupBy.isEmpty()) {
+            if (query.projections.isEmpty() && query.orderBy.any { hasAggregation(it) }) {
+                effectiveGroupBy.add(pql.model.PqlGroupByField(PqlScope.TRACE, "traceId"))
+            }
+        } else {
+            for (proj in unaggregatedProjections) {
+                val scope = proj.scope ?: PqlScope.EVENT
+                val attr = proj.attribute ?: proj.raw
+                if (effectiveGroupBy.none { it.attribute == attr && it.scope == scope }) {
+                    effectiveGroupBy.add(pql.model.PqlGroupByField(scope, attr))
+                }
+            }
+        }
+
         val flatGroups = mutableMapOf<String, MutableList<JsonObject>>()
-
-        val hasImplicitGlobalHoisting = query.groupBy.isEmpty() && query.projections.any { it.function is pql.model.PqlFunction.AggregationFunction && it.function.attribute?.startsWith("^^") == true }
-
-        val needsPerTraceGrouping = !hasImplicitGlobalHoisting && query.groupBy.none { it.attribute.startsWith("^") }
 
         for (element in docs) {
             if (!element.isJsonObject) continue
             val doc = element.asJsonObject
             val tId = doc.get("traceId")?.takeIf { !it.isJsonNull }?.asString?.intern() ?: "unknown"
-            val tracePrefix = if (needsPerTraceGrouping) "$tId|" else ""
 
-            val groupKey = if (query.groupBy.isEmpty()) {
-                if (hasImplicitGlobalHoisting) "GLOBAL_GROUP" else tracePrefix
+            val groupKey = if (effectiveGroupBy.isEmpty()) {
+                "GLOBAL_GROUP"
             } else {
-                tracePrefix + query.groupBy.joinToString("|") { gb ->
-                    val lId = doc.get("logId")?.takeIf { !it.isJsonNull }?.asString?.intern()
-                    val targetDoc = when (gb.scope) {
-                        PqlScope.LOG -> if (lId != null) (logDocsMap[lId] ?: doc) else doc
-                        PqlScope.TRACE -> traceDocsMap[tId] ?: doc
-                        else -> doc
+                effectiveGroupBy.joinToString("|") { gb ->
+                    if (gb.attribute == "traceId") {
+                        tId
+                    } else {
+                        val lId = doc.get("logId")?.takeIf { !it.isJsonNull }?.asString?.intern()
+                        val targetDoc = when (gb.scope) {
+                            PqlScope.LOG -> if (lId != null) (logDocsMap[lId] ?: doc) else doc
+                            PqlScope.TRACE -> traceDocsMap[tId] ?: doc
+                            else -> doc
+                        }
+                        val cleanAttr = gb.attribute.removePrefix("[").removeSuffix("]").removePrefix("^^").removePrefix("^")
+                        val extracted = extractRobustValue(targetDoc, gb.scope, cleanAttr)
+                        extracted?.toString() ?: "null"
                     }
-
-                    val cleanAttr = gb.attribute.removePrefix("^^").removePrefix("^")
-                    val extracted = extractRobustValue(targetDoc, gb.scope, cleanAttr)
-                    extracted?.toString() ?: "null"
                 }
             }
 
@@ -951,8 +1014,7 @@ class PqlQueryExecutor(
                     val finalValA = numA ?: valA
                     val finalValB = numB ?: valB
 
-                    cmp = compareExtractedValues(finalValA, finalValB)
-                    if (order.direction == SortDirection.DESC) cmp = -cmp
+                    cmp = compareExtractedValues(finalValA, finalValB, order.direction)
                     if (cmp != 0) break
                 }
                 cmp
@@ -998,7 +1060,7 @@ class PqlQueryExecutor(
     }
 
     private fun formatVariantGroupedResponse(docs: JsonArray, query: PqlQuery, hoistedGroupField: pql.model.PqlGroupByField): JsonArray {
-        val attrName = hoistedGroupField.attribute.removePrefix("^").removePrefix("e:")
+        val attrName = hoistedGroupField.attribute.removePrefix("[").removeSuffix("]").removePrefix("^^").removePrefix("^").removePrefix("e:")
         val eventsByTrace = mutableMapOf<String, MutableList<JsonObject>>()
 
         for (element in docs) {
@@ -1013,7 +1075,10 @@ class PqlQueryExecutor(
             val attr = order.attribute.lowercase()
             attr.startsWith("count") || attr.startsWith("min") || attr.startsWith("max") || attr.startsWith("avg") || attr.startsWith("sum")
         }
-        val traceGroupKeys = query.groupBy.filter { !it.attribute.startsWith("^") && it.scope != PqlScope.EVENT }
+        val traceGroupKeys = query.groupBy.filter {
+            val attr = it.attribute.removePrefix("[")
+            !attr.startsWith("^") && it.scope != PqlScope.EVENT
+        }
 
         val validTraceIds = eventsByTrace.keys.filter { it != "unknown" }.toSet()
         val traceDocsMap = mutableMapOf<String, JsonObject>()
@@ -1039,8 +1104,7 @@ class PqlQueryExecutor(
                 if (innerSortRule != null) {
                     val valA = extractRobustValue(a, innerSortRule.scope, innerSortRule.attribute)
                     val valB = extractRobustValue(b, innerSortRule.scope, innerSortRule.attribute)
-                    cmp = compareExtractedValues(valA, valB)
-                    if (innerSortRule.direction == SortDirection.DESC) cmp = -cmp
+                    cmp = compareExtractedValues(valA, valB, innerSortRule.direction)
                 } else {
                     val idxA = a.get("eventIndex")?.takeIf { !it.isJsonNull }?.asInt ?: 0
                     val idxB = b.get("eventIndex")?.takeIf { !it.isJsonNull }?.asInt ?: 0
@@ -1138,8 +1202,7 @@ class PqlQueryExecutor(
                 if (valA == null) valA = a.first.get("count")?.asInt
                 if (valB == null) valB = b.first.get("count")?.asInt
 
-                var cmp = compareExtractedValues(valA, valB)
-                if (outerSortRule.direction == SortDirection.DESC) cmp = -cmp
+                var cmp = compareExtractedValues(valA, valB, outerSortRule.direction)
                 cmp
             })
         } else {
@@ -1343,7 +1406,7 @@ class PqlQueryExecutor(
         val scope = func.scope ?: pql.model.PqlScope.EVENT
         val attribute = func.attribute ?: return null
 
-        val cleanAttribute = attribute.removePrefix("^^").removePrefix("^")
+        val cleanAttribute = attribute.removePrefix("[").removeSuffix("]").removePrefix("^^").removePrefix("^")
 
         val rawValues = events.mapNotNull { evt ->
             val tId = evt.get("traceId")?.takeIf { !it.isJsonNull }?.asString
@@ -1371,23 +1434,27 @@ class PqlQueryExecutor(
             }
         }
 
-        val isStringAgg = rawValues.any { it is String && it.toDoubleOrNull() == null } &&
-                (cleanAttribute.contains("name") || cleanAttribute.contains("time") || cleanAttribute.contains("timestamp") || cleanAttribute.contains("resource") || cleanAttribute.contains("transition"))
+        val allNumbers = rawValues.all { it is Number || it.toString().toDoubleOrNull() != null }
 
-        if (isStringAgg && (aggType.name == "MIN" || aggType.name == "MAX")) {
+        if (!allNumbers && (aggType.name == "MIN" || aggType.name == "MAX")) {
             val strValues = rawValues.map { it.toString() }
             return if (aggType.name == "MIN") strValues.minOrNull() else strValues.maxOrNull()
         }
 
         val values = rawValues.mapNotNull { extracted ->
-            if (extracted is String && (cleanAttribute.contains("time") || cleanAttribute.contains("timestamp"))) {
-                dateParsingCache.getOrPut(extracted) {
-                    try {
-                        val format = DateTimeFormatter.ISO_DATE_TIME
-                        val ta = format.parseBest(extracted, Instant::from, OffsetDateTime::from)
-                        if (ta is Instant) ta.toEpochMilli().toDouble() else (ta as OffsetDateTime).toInstant().toEpochMilli().toDouble()
-                    } catch(e: Exception) {
-                        extracted.toDoubleOrNull() ?: 0.0
+            if (extracted is String) {
+                val asDouble = extracted.toDoubleOrNull()
+                if (asDouble != null) {
+                    asDouble
+                } else {
+                    dateParsingCache.getOrPut(extracted) {
+                        try {
+                            val format = DateTimeFormatter.ISO_DATE_TIME
+                            val ta = format.parseBest(extracted, Instant::from, OffsetDateTime::from)
+                            if (ta is Instant) ta.toEpochMilli().toDouble() else (ta as OffsetDateTime).toInstant().toEpochMilli().toDouble()
+                        } catch(e: Exception) {
+                            0.0
+                        }
                     }
                 }
             } else if (extracted is Number) {
@@ -1480,14 +1547,16 @@ class PqlQueryExecutor(
     }
 
     @Suppress("UNCHECKED_CAST")
-    private fun compareExtractedValues(a: Any?, b: Any?): Int {
+    private fun compareExtractedValues(a: Any?, b: Any?, direction: SortDirection = SortDirection.ASC): Int {
         if (a == null && b == null) return 0
         if (a == null) return 1
         if (b == null) return -1
 
-        if (a is Double && b is Double) return a.compareTo(b)
-        if (a is Boolean && b is Boolean) return a.compareTo(b)
+        var cmp = 0
+        if (a is Double && b is Double) cmp = a.compareTo(b)
+        else if (a is Boolean && b is Boolean) cmp = a.compareTo(b)
+        else cmp = a.toString().compareTo(b.toString())
 
-        return a.toString().compareTo(b.toString())
+        return if (direction == SortDirection.DESC) -cmp else cmp
     }
 }

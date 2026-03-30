@@ -8,5 +8,6 @@ data class Event(
     val name: String? = null,
     val timestamp: String? = null,
     val attributes: Map<String, Any?> = emptyMap(),
+    val types: Map<String, String> = emptyMap(),
     val relatedObjects: Map<String, List<String>> = emptyMap()
 )

@@ -47,11 +47,15 @@ class PqlResultFormatter(private val fieldMapper: PqlFieldMapper) {
                         result.add(k, v)
                     }
                 }
-            } else if (projection.attribute != null) {
-                val attrValue = extractField(doc, projection.scope ?: PqlScope.EVENT, projection.attribute)
-                if (attrValue != null) result.add(alias, attrValue)
-            } else if (projection.function != null || projection.arithmeticExpression != null) {
-                if (doc.has(projection.raw)) result.add(alias, doc.get(projection.raw))
+            } else {
+                if (doc.has(projection.raw) && !doc.get(projection.raw).isJsonNull) {
+                    result.add(alias, doc.get(projection.raw))
+                } else if (projection.attribute != null) {
+                    val attrValue = extractField(doc, projection.scope ?: PqlScope.EVENT, projection.attribute)
+                    result.add(alias, attrValue ?: com.google.gson.JsonNull.INSTANCE)
+                } else {
+                    result.add(alias, com.google.gson.JsonNull.INSTANCE)
+                }
             }
         }
 
@@ -59,11 +63,11 @@ class PqlResultFormatter(private val fieldMapper: PqlFieldMapper) {
     }
 
     private fun extractField(doc: JsonObject, scope: PqlScope, attr: String): JsonElement? {
-        val cleanAttr = fieldMapper.getStandardName(attr).removePrefix("^^").removePrefix("^")
+        val cleanAttr = fieldMapper.getStandardName(attr).removePrefix("[").removeSuffix("]").removePrefix("^^").removePrefix("^")
 
         val isClassifier = cleanAttr.startsWith("c:") || cleanAttr.startsWith("classifier:") || cleanAttr.startsWith("e:c:") || cleanAttr.startsWith("t:c:") || cleanAttr.startsWith("l:c:")
         if (isClassifier) {
-            val baseAttr = cleanAttr.removePrefix("e:c:").removePrefix("c:").removePrefix("classifier:")
+            val baseAttr = cleanAttr.removePrefix("e:c:").removePrefix("t:c:").removePrefix("l:c:").removePrefix("c:").removePrefix("classifier:")
             val mappedFields = fieldMapper.getImplicitClassifierMapping(baseAttr)
             val vals = mappedFields.mapNotNull { part ->
                 PqlQueryExecutor.extractRobustValue(doc, scope, part)?.toString()?.takeIf { it.isNotBlank() && it != "null" }

@@ -8,5 +8,5 @@ class PqlServerApplication
 
 fun main(args: Array<String>) {
     runApplication<PqlServerApplication>(*args)
-    println("🚀 Serwer PQL REST API uruchomiony na porcie 8080!")
+    println("Serwer PQL REST API uruchomiony na porcie 8080!")
 }

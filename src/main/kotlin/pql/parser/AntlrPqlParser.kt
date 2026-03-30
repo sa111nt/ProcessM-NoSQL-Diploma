@@ -8,8 +8,6 @@ import ql.QLLexer
 
 class AntlrPqlParser {
 
-    // ZMIANA: Typ zwracany zmieniony na 'Any', ponieważ funkcja może zwrócić
-    // PqlQuery (SELECT) lub PqlDeleteQuery (DELETE).
     fun parse(queryText: String): Any {
         val charStream = CharStreams.fromString(queryText)
         val caseInsensitiveStream = CaseChangingCharStream(charStream, upper = false)
@@ -30,16 +28,14 @@ class AntlrPqlParser {
 
         walker.walk(listener, tree)
 
-        // Tutaj zwracamy różne typy w zależności od tego, co wykrył listener
         if (listener.isDelete()) {
-            return listener.buildDeleteQuery() // Zwraca PqlDeleteQuery
+            return listener.buildDeleteQuery()
         }
-        return listener.buildQuery() // Zwraca PqlQuery
+        return listener.buildQuery()
     }
 
     fun parseDelete(queryText: String): PqlDeleteQuery {
         val result = parse(queryText)
-        // Sprawdzamy, czy wynik to faktycznie DELETE
         if (result is PqlDeleteQuery) return result
 
         throw IllegalArgumentException("Expected DELETE query, but got ${result::class.simpleName}")

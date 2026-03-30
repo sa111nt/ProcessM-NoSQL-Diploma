@@ -105,7 +105,11 @@ class StreamingXesToCouchDBMapper(
         writer.beginObject()
         writer.name("_id").value(logId)
         writer.name("docType").value("log")
-        writer.name("source").value(logAttr.attributes["source"]?.toString() ?: "unknown")
+
+        logAttr.attributes["source"]?.let {
+            writer.name("source").value(it.toString())
+        }
+
         writer.name("importTimestamp").value(System.currentTimeMillis())
 
         if (logAttr.extensions.isNotEmpty()) {
@@ -126,7 +130,7 @@ class StreamingXesToCouchDBMapper(
                 writer.beginObject()
                 writer.name("scope").value(g.scope)
                 writer.name("attributes")
-                writeAttributes(writer, g.attributes)
+                writeAttributes(writer, g.attributes, emptyMap())
                 writer.endObject()
             }
             writer.endArray()
@@ -144,7 +148,7 @@ class StreamingXesToCouchDBMapper(
         }
 
         writer.name("log_attributes")
-        writeAttributes(writer, logAttr.attributes)
+        writeAttributes(writer, logAttr.attributes, logAttr.types)
         writer.endObject()
     }
 
@@ -158,7 +162,7 @@ class StreamingXesToCouchDBMapper(
         writer.name("l:concept:name").value(logName)
 
         writer.name("xes_attributes")
-        writeAttributes(writer, trace.attributes)
+        writeAttributes(writer, trace.attributes, trace.types)
         writer.endObject()
     }
 
@@ -191,22 +195,22 @@ class StreamingXesToCouchDBMapper(
         }
 
         writer.name("xes_attributes")
-        writeAttributes(writer, event.attributes)
+        writeAttributes(writer, event.attributes, event.types)
         writer.endObject()
     }
 
-    private fun writeAttributes(writer: JsonWriter, attributes: Map<String, Any?>) {
+    private fun writeAttributes(writer: JsonWriter, attributes: Map<String, Any?>, types: Map<String, String>) {
         writer.beginObject()
         for ((k, v) in attributes) {
-            try {
-                val nullableKey: String? = k as String?
-                val safeKey = if (!nullableKey.isNullOrBlank()) nullableKey else "unknown_attribute_key"
-                writer.name(safeKey)
-                writeValue(writer, v)
-            } catch (e: Exception) {
-                throw e
-            }
+            writer.name(k)
+            writeValue(writer, v)
         }
+        writer.name("_types")
+        writer.beginObject()
+        for ((k, t) in types) {
+            writer.name(k).value(t)
+        }
+        writer.endObject()
         writer.endObject()
     }
 

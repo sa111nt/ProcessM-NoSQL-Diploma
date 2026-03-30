@@ -23,16 +23,12 @@ class PqlInterpreter(
         val parsedObject = parser.parse(pql)
 
         return when (parsedObject) {
-            // --- OBSŁUGA DLA SELECT ---
             is PqlQuery -> {
                 executor.execute(parsedObject)
             }
 
-            // --- CZYSTA OBSŁUGA DLA DELETE ---
             is PqlDeleteQuery -> {
-                println("\n--- [DEBUG PQL INTERPRETER] ROZPOCZYNAM PROCEDURĘ DELETE ---")
                 val result = executor.executeDelete(parsedObject)
-                println("--- [DEBUG PQL INTERPRETER] ZAKOŃCZONO PROCEDURĘ DELETE ---\n")
                 JsonArray().apply { add(result) }
             }
 

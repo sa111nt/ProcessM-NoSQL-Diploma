@@ -2,24 +2,27 @@ package app
 
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
+import com.google.gson.JsonParser
 import db.CouchDBManager
 import java.io.File
 import java.io.Writer
+import java.util.UUID
 
 class XesExporter(private val dbManager: CouchDBManager, private val dbName: String) {
 
-    fun exportToFile(logId: String, outputFilePath: String) {
-        println("Rozpoczynam eksport logu '$logId' do pliku '$outputFilePath'...")
-        val startTime = System.currentTimeMillis()
+    private class XesNode(val tag: String, val key: String, var value: String? = null) {
+        val children = mutableMapOf<String, XesNode>()
+    }
 
+    fun exportToFile(logId: String, outputFilePath: String) {
         val logQuery = """{"selector": {"docType": "log", "_id": "$logId"}, "limit": 1}"""
-        val logDocs = dbManager.findDocs(dbName, com.google.gson.JsonParser.parseString(logQuery).asJsonObject)
+        val logDocs = dbManager.findDocs(dbName, JsonParser.parseString(logQuery).asJsonObject)
 
         val tracesQuery = """{"selector": {"docType": "trace", "logId": "$logId"}, "limit": 100000}"""
-        val traces = dbManager.findDocs(dbName, com.google.gson.JsonParser.parseString(tracesQuery).asJsonObject)
+        val traces = dbManager.findDocs(dbName, JsonParser.parseString(tracesQuery).asJsonObject)
 
         val eventsQuery = """{"selector": {"docType": "event", "logId": "$logId"}, "limit": 1000000}"""
-        val events = dbManager.findDocs(dbName, com.google.gson.JsonParser.parseString(eventsQuery).asJsonObject)
+        val events = dbManager.findDocs(dbName, JsonParser.parseString(eventsQuery).asJsonObject)
 
         val eventsByTrace = mutableMapOf<String, MutableList<JsonObject>>()
         for (i in 0 until events.size()) {
@@ -44,10 +47,7 @@ class XesExporter(private val dbManager: CouchDBManager, private val dbName: Str
                     val exts = logObj.getAsJsonArray("extensions")
                     for (i in 0 until exts.size()) {
                         val ext = exts[i].asJsonObject
-                        val extName = escapeXml(ext.get("name")?.asString ?: "")
-                        val extPrefix = escapeXml(ext.get("prefix")?.asString ?: "")
-                        val extUri = escapeXml(ext.get("uri")?.asString ?: "")
-                        writer.write("""  <extension name="$extName" prefix="$extPrefix" uri="$extUri"/>""" + "\n")
+                        writer.write("""  <extension name="${escapeXml(ext.get("name")?.asString ?: "")}" prefix="${escapeXml(ext.get("prefix")?.asString ?: "")}" uri="${escapeXml(ext.get("uri")?.asString ?: "")}"/>""" + "\n")
                     }
                 }
 
@@ -68,9 +68,7 @@ class XesExporter(private val dbManager: CouchDBManager, private val dbName: Str
                     val classifiers = logObj.getAsJsonArray("classifiers")
                     for (i in 0 until classifiers.size()) {
                         val c = classifiers[i].asJsonObject
-                        val cName = escapeXml(c.get("name")?.asString ?: "")
-                        val cKeys = escapeXml(c.get("keys")?.asString ?: "")
-                        writer.write("""  <classifier name="$cName" keys="$cKeys"/>""" + "\n")
+                        writer.write("""  <classifier name="${escapeXml(c.get("name")?.asString ?: "")}" keys="${escapeXml(c.get("keys")?.asString ?: "")}"/>""" + "\n")
                     }
                 }
 
@@ -79,9 +77,7 @@ class XesExporter(private val dbManager: CouchDBManager, private val dbName: Str
 
             for (i in 0 until traces.size()) {
                 val traceObj = traces[i].asJsonObject
-                val traceIdElem = traceObj.get("_id")
-                if (traceIdElem == null || traceIdElem.isJsonNull) continue
-                val traceId = traceIdElem.asString
+                val traceId = traceObj.get("_id")?.takeIf { !it.isJsonNull }?.asString ?: continue
 
                 writer.write("  <trace>\n")
                 writeAttributes(writer, traceObj, 4)
@@ -92,80 +88,104 @@ class XesExporter(private val dbManager: CouchDBManager, private val dbName: Str
                     writeAttributes(writer, eventObj, 6)
                     writer.write("    </event>\n")
                 }
-
                 writer.write("  </trace>\n")
             }
             writer.write("</log>\n")
         }
-
-        val duration = System.currentTimeMillis() - startTime
-        println("✅ Pomyślnie wyeksportowano ${traces.size()} śladów i ${events.size()} zdarzeń w czasie ${duration}ms.")
     }
 
     private fun writeAttributes(writer: Writer, jsonObject: JsonObject, indentLevel: Int) {
-        val indent = " ".repeat(indentLevel)
-
         val targetObj = when {
             jsonObject.has("log_attributes") && !jsonObject.get("log_attributes").isJsonNull -> jsonObject.getAsJsonObject("log_attributes")
-            jsonObject.has("attributes") && !jsonObject.get("attributes").isJsonNull -> jsonObject.getAsJsonObject("attributes")
             jsonObject.has("xes_attributes") && !jsonObject.get("xes_attributes").isJsonNull -> jsonObject.getAsJsonObject("xes_attributes")
+            jsonObject.has("attributes") && !jsonObject.get("attributes").isJsonNull -> jsonObject.getAsJsonObject("attributes")
             else -> jsonObject
         }
 
+        val typesObj = if (targetObj.has("_types")) targetObj.getAsJsonObject("_types") else JsonObject()
+
         val combinedAttributes = JsonObject()
-        for ((k, v) in targetObj.entrySet()) {
-            combinedAttributes.add(k, v)
-        }
+        targetObj.entrySet().forEach { (k, v) -> combinedAttributes.add(k, v) }
 
         if (jsonObject.has("identity:id") && !jsonObject.get("identity:id").isJsonNull) combinedAttributes.add("identity:id", jsonObject.get("identity:id"))
         if (jsonObject.has("timestamp") && !jsonObject.get("timestamp").isJsonNull) combinedAttributes.add("time:timestamp", jsonObject.get("timestamp"))
         if (jsonObject.has("activity") && !jsonObject.get("activity").isJsonNull) combinedAttributes.add("concept:name", jsonObject.get("activity"))
-        if (jsonObject.has("source") && !jsonObject.get("source").isJsonNull) combinedAttributes.add("source", jsonObject.get("source"))
+
+        val rootNodes = mutableMapOf<String, XesNode>()
 
         for ((key, element) in combinedAttributes.entrySet()) {
-            // Ignorujemy wstrzyknięte klucze bazy NoSQL
-            if (key.startsWith("_") || key == "docType" || key == "logId" || key == "traceId" || key == "eventIndex" || key == "originalTraceId") continue
-            if (key == "extensions" || key == "globals" || key == "classifiers" || key == "importTimestamp") continue
+            if (key == "_types" || key.startsWith("_") || key == "docType" || key == "logId" || key == "traceId" || key == "eventIndex" || key == "originalTraceId") continue
+            if (key == "extensions" || key == "globals" || key == "classifiers" || key == "importTimestamp" || key == "source") continue
             if (element.isJsonNull) continue
 
             val primitive = if (element.isJsonPrimitive) element.asJsonPrimitive else continue
             val valueStr = primitive.asString
-            val safeValue = escapeXml(valueStr)
 
-            val tag = when {
-                primitive.isBoolean -> "boolean"
-                primitive.isNumber -> if (valueStr.contains(".") || valueStr.contains("e") || valueStr.contains("E")) "float" else "int"
-                else -> {
-                    val isUuid = try {
-                        java.util.UUID.fromString(valueStr)
-                        true
-                    } catch (e: Exception) { false }
+            val explicitType = if (typesObj.has(key)) typesObj.get(key).asString else null
 
-                    if (isUuid) {
-                        "id"
-                    } else if (valueStr.matches(Regex("""^\d{4}-\d{2}-\d{2}T.*"""))) {
-                        "date"
-                    } else {
-                        "string"
+            if (explicitType != null && explicitType.contains("[")) {
+                val parts = explicitType.split("|")
+                var currentMap = rootNodes
+
+                for (i in parts.indices) {
+                    val part = parts[i]
+                    val tagEnd = part.indexOf('[')
+                    if (tagEnd == -1) continue
+
+                    val tag = part.substring(0, tagEnd)
+                    val partKey = part.substring(tagEnd + 1, part.length - 1)
+
+                    val node = currentMap.getOrPut(partKey) { XesNode(tag, partKey) }
+
+                    if (i == parts.size - 1) {
+                        node.value = valueStr
                     }
+                    currentMap = node.children
                 }
+            } else {
+                val tag = explicitType ?: when {
+                    primitive.isBoolean -> "boolean"
+                    primitive.isNumber -> if (valueStr.contains(".") || valueStr.contains("e") || valueStr.contains("E")) "float" else "int"
+                    key.contains("identity:id") || isPotentialUuid(valueStr) -> "id"
+                    valueStr.matches(Regex("""^\d{4}-\d{2}-\d{2}T.*""")) -> "date"
+                    else -> "string"
+                }
+                val node = rootNodes.getOrPut(key) { XesNode(tag, key) }
+                node.value = valueStr
             }
+        }
 
-            writer.write("$indent<$tag key=\"$key\" value=\"$safeValue\"/>\n")
+        for (node in rootNodes.values) {
+            writeNode(writer, node, indentLevel)
         }
     }
 
-    private fun getTimestampOrEmpty(eventObj: JsonObject): String {
-        if (eventObj.has("timestamp") && !eventObj.get("timestamp").isJsonNull) {
-            return eventObj.get("timestamp").asString
-        }
-        if (eventObj.has("xes_attributes") && !eventObj.get("xes_attributes").isJsonNull) {
-            val attrs = eventObj.getAsJsonObject("xes_attributes")
-            if (attrs.has("time:timestamp") && !attrs.get("time:timestamp").isJsonNull) {
-                return attrs.get("time:timestamp").asString
+    private fun writeNode(writer: Writer, node: XesNode, indentLevel: Int) {
+        val indent = " ".repeat(indentLevel)
+        val safeKey = escapeXml(node.key)
+
+        if (node.children.isEmpty()) {
+            val safeValue = escapeXml(node.value ?: "")
+            writer.write("$indent<${node.tag} key=\"$safeKey\" value=\"$safeValue\"/>\n")
+        } else {
+            writer.write("$indent<${node.tag} key=\"$safeKey\">\n")
+            for (child in node.children.values) {
+                writeNode(writer, child, indentLevel + 2)
             }
+            writer.write("$indent</${node.tag}>\n")
         }
-        return ""
+    }
+
+    private fun isPotentialUuid(s: String): Boolean {
+        return try {
+            s.length >= 32 && s.contains("-")
+        } catch (e: Exception) { false }
+    }
+
+    private fun getTimestampOrEmpty(eventObj: JsonObject): String {
+        return eventObj.get("timestamp")?.takeIf { !it.isJsonNull }?.asString
+            ?: eventObj.getAsJsonObject("xes_attributes")?.get("time:timestamp")?.takeIf { !it.isJsonNull }?.asString
+            ?: ""
     }
 
     private fun escapeXml(input: String): String {

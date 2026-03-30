@@ -13,7 +13,8 @@ data class XESLogAttributes(
     val extensions: List<XesExtension> = emptyList(),
     val globals: List<XesGlobal> = emptyList(),
     val classifiersDef: List<XesClassifier> = emptyList(),
-    val classifiers: Map<String, List<String>> = emptyMap() // Mapa dla PQL Explorera
+    val classifiers: Map<String, List<String>> = emptyMap(),
+    val types: Map<String, String>
 ) : XESComponent()
 
 data class XESTrace(val trace: Trace) : XESComponent()

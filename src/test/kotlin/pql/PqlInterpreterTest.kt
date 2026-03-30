@@ -168,33 +168,19 @@ class PqlInterpreterTest {
         val query = "select e:name, [e:c:Event Name] where l:_id='$journalLogId'"
         val stream = interpreter.executeQuery(query).asJsonArray
 
-        // --- SEKCJA DEBUG ---
-        println("\n=== DEBUG: duplicateAttributes ===")
-        println("Zapytanie: $query")
-        val gson = com.google.gson.GsonBuilder().setPrettyPrinting().create()
-        if (stream.size() > 0) {
-            println("Pierwszy dokument z wyniku:")
-            println(gson.toJson(stream[0]))
-        } else {
-            println("Brak wyników (stream jest pusty)!")
-        }
-        println("==================================\n")
-
         val uniqueLogs = stream.mapNotNull { it.asJsonObject.get("logId")?.asString }.toSet()
         val uniqueTraces = stream.mapNotNull { it.asJsonObject.get("traceId")?.asString ?: it.asJsonObject.get("t:name")?.asString }.toSet()
 
-        // Poprawione: szukamy w obrębie jednego konkretnego logu
-        assertEquals(1, uniqueLogs.size, "Oczekiwano jednego unikalnego logId")
+        assertEquals(1, uniqueLogs.size)
         assertEquals(101, uniqueTraces.size)
 
         for (i in 0 until stream.size()) {
             val doc = stream[i].asJsonObject
             val conceptName = doc.get("e:name")?.asString ?: doc.get("e:concept:name")?.asString
-            assertTrue(eventNames.contains(conceptName), "Nieznana nazwa zdarzenia: $conceptName")
+            assertTrue(eventNames.contains(conceptName))
 
-            // W silniku NoSQL otrzymasz 2 klucze, bo jawnie o nie poprosiłeś w SELECT
             val keysCount = doc.keySet().count { it == "e:name" || it == "e:concept:name" || it == "[e:c:Event Name]" }
-            assertEquals(2, keysCount, "Oczekiwano dwóch kluczy w wyniku (e:name oraz klasyfikator)")
+            assertEquals(2, keysCount)
         }
     }
 
@@ -699,7 +685,7 @@ class PqlInterpreterTest {
         val doc = countStream[0].asJsonObject.getAsJsonArray("events")?.get(0)?.asJsonObject ?: countStream[0].asJsonObject
         val totalLogs = (doc.get("count(l:_id)")?.asLong ?: 0L).toInt()
 
-        assertTrue(totalLogs >= 2, "This test requires at least two event logs")
+        assertTrue(totalLogs >= 2)
 
         val q1 = interpreter.executeQuery("select l:name limit l:$totalLogs, t:1, e:1").asJsonArray
         assertEquals(totalLogs, q1.size())
@@ -751,9 +737,7 @@ class PqlInterpreterTest {
 
         val childrenKeys = doc.keySet().filter { it.contains("named_events_total:") }
 
-        if (childrenKeys.isEmpty()) {
-            println("\n[WARNING] Importer bazy danych nie przeniósł zagnieżdżonych dzieci do bazy CouchDB. Pomyślnie zwalidowano bazowy węzeł. Asercje dziecięce zostały bezpiecznie pominięte.\n")
-        } else {
+        if (childrenKeys.isNotEmpty()) {
             assertEquals(624, childrenKeys.size)
             assertEquals(23L, doc.get("l:meta_concept:named_events_total:haptoglobine")?.asLong ?: 0L)
             assertEquals(24L, doc.get("l:meta_concept:named_events_total:ijzer")?.asLong ?: 0L)
@@ -810,13 +794,13 @@ class PqlInterpreterTest {
     @Test
     fun hierarchyReturned() {
         val stream = interpreter.executeQuery("where l:_id='$journalLogId' limit l:1").asJsonArray
-        assertTrue(stream.size() > 1, "Powinno zwrócić wiele zdarzeń (spłaszczoną reprezentację całego logu), a nie tylko 1 nagłówek")
+        assertTrue(stream.size() > 1)
 
         val firstEvent = stream[0].asJsonObject
 
-        assertNotNull(firstEvent.get("l:concept:name") ?: firstEvent.get("l:name"), "Brak atrybutów poziomu Log")
-        assertNotNull(firstEvent.get("t:concept:name") ?: firstEvent.get("t:name"), "Brak atrybutów poziomu Trace")
-        assertNotNull(firstEvent.get("e:concept:name") ?: firstEvent.get("activity"), "Brak atrybutów poziomu Event")
+        assertNotNull(firstEvent.get("l:concept:name") ?: firstEvent.get("l:name"))
+        assertNotNull(firstEvent.get("t:concept:name") ?: firstEvent.get("t:name"))
+        assertNotNull(firstEvent.get("e:concept:name") ?: firstEvent.get("activity"))
     }
 
     @Test
@@ -832,8 +816,8 @@ class PqlInterpreterTest {
         val valShort = docShort.get("l:name")?.asString
         val valFull = docFull.get("l:concept:name")?.asString
 
-        assertNotNull(valShort, "Skrót l:name nie wyekstrahował wartości")
-        assertEquals(valShort, valFull, "Wartości dla l:name i l:concept:name powinny być identyczne")
+        assertNotNull(valShort)
+        assertEquals(valShort, valFull)
     }
 
     @Test
@@ -843,7 +827,7 @@ class PqlInterpreterTest {
         for (i in 0 until stream.size()) {
             val doc = stream[i].asJsonObject
             val timestamp = doc.get("e:time:timestamp")?.asString
-            assertNotNull(timestamp, "Brak atrybutu e:time:timestamp")
+            assertNotNull(timestamp)
             assertNotNull(Instant.parse(timestamp))
         }
     }
@@ -866,13 +850,13 @@ class PqlInterpreterTest {
         val exporter = app.XesExporter(dbManager, dbName)
         exporter.exportToFile(journalLogId, exportFile.absolutePath)
 
-        assertTrue(exportFile.exists(), "Plik eksportowy XES nie został utworzony")
+        assertTrue(exportFile.exists())
         val content = exportFile.readText()
 
         assertTrue(content.contains("""<log xes.version="1.0""""))
         assertTrue(content.contains("<trace>"))
         assertTrue(content.contains("<event>"))
-        assertTrue(content.contains("concept:name"), "Brak wymaganego atrybutu 'concept:name' w pliku XES")
+        assertTrue(content.contains("concept:name"))
 
         exportFile.delete()
     }
@@ -883,7 +867,7 @@ class PqlInterpreterTest {
             interpreter.executeQuery("SELECT * FROM NIEZNANA_SKLADNIA_BEZ_SENSE WHERE").asJsonArray
         }
         val msg = ex.message ?: ""
-        assertTrue(msg.contains("Parse error", ignoreCase = true) || msg.contains("Syntax error", ignoreCase = true), "Oczekiwano komunikatu o błędzie składniowym, otrzymano: $msg")
+        assertTrue(msg.contains("Parse error", ignoreCase = true) || msg.contains("Syntax error", ignoreCase = true))
     }
 
     @Test
@@ -894,9 +878,9 @@ class PqlInterpreterTest {
         val internalId = event.get("_id")?.asString
         val originalIdentityId = event.get("e:identity:id")?.asString ?: event.get("identity:id")?.asString
 
-        assertNotNull(internalId, "Brak wewnętrznego klucza _id bazy danych CouchDB")
-        assertNotNull(originalIdentityId, "Zgubiono oryginalny identyfikator 'identity:id' z wgranego logu XES")
-        assertTrue(internalId != originalIdentityId, "Oryginalne ID zostało niepotrzebnie i niszczycielsko nadpisane wygenerowanym kluczem NoSQL")
+        assertNotNull(internalId)
+        assertNotNull(originalIdentityId)
+        assertTrue(internalId != originalIdentityId)
     }
 
     @Test
@@ -907,14 +891,14 @@ class PqlInterpreterTest {
         val exporter = app.XesExporter(dbManager, dbName)
         exporter.exportToFile(advancedFeaturesLogId, exportFile.absolutePath)
 
-        assertTrue(exportFile.exists(), "Plik nie został wyeksportowany")
+        assertTrue(exportFile.exists())
         val content = exportFile.readText()
 
-        assertTrue(content.contains("""<extension name="AdvancedCustomExt" prefix="adv""""), "Brak dynamicznego rozszerzenia!")
-        assertFalse(content.contains("""<extension name="Organizational""""), "Eksport dodał sztywne rozszerzenie!")
+        assertTrue(content.contains("""<extension name="AdvancedCustomExt" prefix="adv""""))
+        assertFalse(content.contains("""<extension name="Organizational""""))
 
-        assertTrue(content.contains("""<global scope="trace">"""), "Brak tagu global dla trace!")
-        assertTrue(content.contains("""<classifier name="MyCustomClassifier" keys="concept:name adv:level"/>"""), "Brak klasyfikatora!")
+        assertTrue(content.contains("""<global scope="trace">"""))
+        assertTrue(content.contains("""<classifier name="MyCustomClassifier" keys="concept:name adv:level"/>"""))
 
         exportFile.delete()
     }
@@ -928,12 +912,12 @@ class PqlInterpreterTest {
         exporter.exportToFile(advancedFeaturesLogId, exportFile.absolutePath)
         val content = exportFile.readText()
 
-        assertTrue(content.contains("""<string key="time:timestamp" value="To nie jest data, to zwykly tekst!"/>"""), "Fałszywy timestamp nie został rozpoznany jako string!")
-        assertTrue(content.contains("""<date key="my_weird_string" value="2023-11-20T14:30:00.000+01:00"/>"""), "Data ukryta pod złą nazwą nie dostała tagu <date>!")
-        assertTrue(content.contains("""<int key="is_premium" value="42"/>"""), "Liczba ukryta pod booleanową nazwą nie dostała tagu <int>!")
-        assertTrue(content.contains("""<float key="my_integer_name" value="3.1415"/>"""), "Ułamek nie dostał tagu <float>!")
-        assertTrue(content.contains("""<boolean key="my_uuid_name" value="true"/>"""), "Boolean nie dostał tagu <boolean>!")
-        assertTrue(content.contains("""<id key="my_string_name" value="123e4567-e89b-12d3-a456-426614174000"/>"""), "UUID nie dostał tagu <id>!")
+        assertTrue(content.contains("""<string key="time:timestamp" value="To nie jest data, to zwykly tekst!"/>"""))
+        assertTrue(content.contains("""<date key="my_weird_string" value="2023-11-20T14:30:00.000+01:00"/>"""))
+        assertTrue(content.contains("""<int key="is_premium" value="42"/>"""))
+        assertTrue(content.contains("""<float key="my_integer_name" value="3.1415"/>"""))
+        assertTrue(content.contains("""<boolean key="my_uuid_name" value="true"/>"""))
+        assertTrue(content.contains("""<id key="my_string_name" value="123e4567-e89b-12d3-a456-426614174000"/>"""))
 
         exportFile.delete()
     }
@@ -947,12 +931,12 @@ class PqlInterpreterTest {
         exporter.exportToFile(advancedFeaturesLogId, exportFile.absolutePath)
         val content = exportFile.readText()
 
-        assertTrue(content.contains("""<string key="identity:id" value="BIZNESOWY-LOG-ID-999"/>"""), "Zniszczono biznesowe identity:id logu!")
-        assertTrue(content.contains("""<string key="identity:id" value="BIZNESOWY-TRACE-ID-123"/>"""), "Zniszczono biznesowe identity:id śladu!")
-        assertTrue(content.contains("""<string key="identity:id" value="BIZNESOWY-EVENT-ID-ABC"/>"""), "Zniszczono biznesowe identity:id zdarzenia!")
+        assertTrue(content.contains("""<string key="identity:id" value="BIZNESOWY-LOG-ID-999"/>"""))
+        assertTrue(content.contains("""<string key="identity:id" value="BIZNESOWY-TRACE-ID-123"/>"""))
+        assertTrue(content.contains("""<string key="identity:id" value="BIZNESOWY-EVENT-ID-ABC"/>"""))
 
-        assertFalse(content.contains("""key="_id""""), "Klucz bazy CouchDB wyciekł do pliku eksportowego!")
-        assertFalse(content.contains("""key="docType""""), "Wewnętrzne pola CouchDB (docType) wyciekły do eksportu!")
+        assertFalse(content.contains("""key="_id""""))
+        assertFalse(content.contains("""key="docType""""))
 
         exportFile.delete()
     }

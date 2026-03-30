@@ -28,13 +28,9 @@ class PqlRestController {
         try { dbManager.createDb(dbName) } catch (e: Exception) { }
     }
 
-    /**
-     * 1. ENDPOINT: Zapytania PQL
-     */
     @PostMapping("/query", consumes = [MediaType.TEXT_PLAIN_VALUE], produces = [MediaType.APPLICATION_JSON_VALUE])
     fun executeQuery(@RequestBody query: String): ResponseEntity<String> {
         return try {
-            println("Otrzymano zapytanie PQL: $query")
             val resultJsonArray = interpreter.executeQuery(query).asJsonArray
             ResponseEntity.ok(resultJsonArray.toString())
         } catch (e: Exception) {
@@ -43,24 +39,18 @@ class PqlRestController {
         }
     }
 
-    /**
-     * 2. ENDPOINT: Import pliku XES (Zwraca ID wgranego logu)
-     */
     @PostMapping("/import")
     fun importLog(@RequestParam("file") file: MultipartFile): ResponseEntity<String> {
         return try {
             val tempFile = File.createTempFile("upload_", "_" + file.originalFilename)
             file.transferTo(tempFile)
 
-            // Wywołujemy importer
             LogImporter.import(tempFile.absolutePath, dbName, dbManager)
             tempFile.delete()
 
-            // ROZWIĄZANIE BŁĘDU 400: Pobieramy logi bez użycia klauzuli 'sort' w CouchDB
             val logQuery = """{"selector": {"docType": "log"}, "limit": 100}"""
             val logs = dbManager.findDocs(dbName, com.google.gson.JsonParser.parseString(logQuery).asJsonObject)
 
-            // Wyszukujemy najnowszy log w pamięci (bezpieczne i błyskawiczne)
             var latestLogId = "unknown"
             var maxTs = 0L
             for (i in 0 until logs.size()) {
@@ -78,9 +68,6 @@ class PqlRestController {
         }
     }
 
-    /**
-     * 3. ENDPOINT: Eksport do XES (Wymusza pobieranie pliku)
-     */
     @GetMapping("/export/{logId}")
     fun exportLog(@PathVariable logId: String): ResponseEntity<Resource> {
         return try {
@@ -99,14 +86,9 @@ class PqlRestController {
         }
     }
 
-    /**
-     * 4. ENDPOINT: Całkowite czyszczenie bazy danych (Usuwa wszystkie logi)
-     */
     @DeleteMapping("/deleteAll")
     fun deleteAllLogs(): ResponseEntity<String> {
         return try {
-            println("Rozpoczęto całkowite czyszczenie bazy danych...")
-            // Najszybszy sposób na wyczyszczenie NoSQL: usunięcie bazy i założenie jej na nowo
             dbManager.deleteDb(dbName)
             dbManager.createDb(dbName)
 

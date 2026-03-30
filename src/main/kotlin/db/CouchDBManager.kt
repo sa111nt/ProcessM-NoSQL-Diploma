@@ -44,11 +44,11 @@ open class CouchDBManager(
         try {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful && response.code != 412) {
-                    throw IOException("Błąd tworzenia bazy '$dbName'. Kod: ${response.code}")
+                    throw IOException("Blad tworzenia bazy '$dbName'. Kod: ${response.code}")
                 }
             }
         } catch (e: Exception) {
-            throw IOException("Nie udało się połączyć z CouchDB ($url).", e)
+            throw IOException("Nie udalo sie polaczyc z CouchDB ($url).", e)
         }
     }
 
@@ -62,11 +62,11 @@ open class CouchDBManager(
         try {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful && response.code != 404) {
-                    throw IOException("Błąd usuwania bazy '$dbName'. Kod: ${response.code}")
+                    throw IOException("Blad usuwania bazy '$dbName'. Kod: ${response.code}")
                 }
             }
         } catch (e: Exception) {
-            throw IOException("Nie udało się połączyć podczas próby usunięcia bazy.", e)
+            throw IOException("Nie udalo sie polaczyc podczas proby usuniecia bazy.", e)
         }
     }
 
@@ -79,18 +79,16 @@ open class CouchDBManager(
             .build()
 
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw IOException("Błąd zapisu batcha: ${response.code}")
+            if (!response.isSuccessful) throw IOException("Blad zapisu batcha: ${response.code}")
         }
     }
 
-    // Klasyczne pobieranie (zwraca JsonArray - używać tylko dla małych wyników)
     open fun findDocs(dbName: String, mangoQuery: JsonObject): JsonArray {
         val result = JsonArray()
         findDocsStream(dbName, mangoQuery) { doc -> result.add(doc) }
         return result
     }
 
-    // 💡 ZŁOTA OPTYMALIZACJA OOM: Strumieniowe czytanie i parsowanie w locie! (Bez budowania wielkich tekstów)
     open fun findDocsStream(dbName: String, mangoQuery: JsonObject, onDocParsed: (JsonObject) -> Unit) {
         val requestBody = gson.toJson(mangoQuery).toRequestBody(JSON_MEDIA_TYPE)
         val request = Request.Builder()
@@ -100,7 +98,7 @@ open class CouchDBManager(
             .build()
 
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw IOException("Błąd zapytania _find: ${response.code}")
+            if (!response.isSuccessful) throw IOException("Blad zapytania _find: ${response.code}")
 
             val reader = com.google.gson.stream.JsonReader(response.body!!.charStream())
             try {
@@ -119,7 +117,7 @@ open class CouchDBManager(
                 }
                 reader.endObject()
             } catch (e: Exception) {
-                println("[ERROR] Błąd strumieniowania JSON z bazy: ${e.message}")
+                throw IOException("Blad strumieniowania JSON z bazy", e)
             }
         }
     }
@@ -147,9 +145,6 @@ open class CouchDBManager(
             .build()
 
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful && response.code != 409) {
-                println("⚠️ Ostrzeżenie: Nie udało się utworzyć indeksu $fields: ${response.code}")
-            }
         }
     }
 
@@ -183,7 +178,7 @@ open class CouchDBManager(
             .build()
 
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) error("❌ Błąd usuwania: ${response.code}")
+            if (!response.isSuccessful) error("Blad usuwania: ${response.code}")
             val reader = response.body?.charStream() ?: return 0
             val respArray = JsonParser.parseReader(reader).asJsonArray
             return respArray.count { !it.asJsonObject.has("error") }

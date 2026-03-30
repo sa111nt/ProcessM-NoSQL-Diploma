@@ -58,7 +58,6 @@ sealed class PqlFunction {
 
     data class AggregationFunction(val type: Aggregation, val scope: PqlScope?, val attribute: String?) : PqlFunction()
 
-    // ZMIANA: Model utrzymuje pełne drzewo AST operacji matematycznych
     data class ScalarFunction1(val type: Scalar1, val expression: PqlArithmeticExpression) : PqlFunction()
     data class ScalarFunction0(val type: Scalar0) : PqlFunction()
 }

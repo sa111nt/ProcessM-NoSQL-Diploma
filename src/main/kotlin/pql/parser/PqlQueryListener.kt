@@ -78,26 +78,19 @@ class PqlQueryListener : QLParserBaseListener() {
             }
         }
 
-        val hasArithmetic = arithExpr.children?.any {
-            it is org.antlr.v4.runtime.tree.TerminalNode &&
-                    (it.text == "+" || it.text == "-" || it.text == "*" || it.text == "/")
-        } ?: false
-
-        if (hasArithmetic) {
-            val arithmeticExpr = parseArithmeticExpression(arithExpr)
-            if (arithmeticExpr != null) {
-                val scope = extractScopeFromArithmetic(arithmeticExpr)
-                updateDetectedScope(scope)
-                projections.add(
-                    PqlProjection(
-                        scope = scope,
-                        attribute = null,
-                        raw = expr.text,
-                        arithmeticExpression = arithmeticExpr
-                    )
+        val arithmeticExpr = parseArithmeticExpression(arithExpr)
+        if (arithmeticExpr != null && arithmeticExpr !is PqlArithmeticExpression.Attribute && arithmeticExpr !is PqlArithmeticExpression.Literal) {
+            val scope = extractScopeFromArithmetic(arithmeticExpr)
+            updateDetectedScope(scope)
+            projections.add(
+                PqlProjection(
+                    scope = scope,
+                    attribute = null,
+                    raw = expr.text,
+                    arithmeticExpression = arithmeticExpr
                 )
-                return
-            }
+            )
+            return
         }
 
         val attribute = parseAttribute(arithExpr)
@@ -112,6 +105,8 @@ class PqlQueryListener : QLParserBaseListener() {
                     raw = expr.text
                 )
             )
+        } else {
+            projections.add(PqlProjection(scope = detectedScope ?: PqlScope.EVENT, attribute = null, raw = expr.text))
         }
     }
 
@@ -160,7 +155,7 @@ class PqlQueryListener : QLParserBaseListener() {
 
         val id = ctx.ID()
         if (id != null) {
-            val (scope, attribute) = parseScopeAndAttribute(id.text) ?: return null
+            val (scope, attribute) = parseScopeAndAttribute(ctx.text) ?: return null
             return PqlArithmeticExpression.Attribute(scope, attribute)
         }
 
@@ -203,8 +198,8 @@ class PqlQueryListener : QLParserBaseListener() {
     private fun parseFunction(ctx: QLParser.FuncContext): PqlFunction? {
         val funcAggr = ctx.FUNC_AGGR()
         if (funcAggr != null) {
-            val id = ctx.ID()?.text ?: return null
-            val (scope, attribute) = parseScopeAndAttribute(id) ?: return null
+            val innerText = ctx.text.substringAfter("(").substringBeforeLast(")")
+            val (scope, attribute) = parseScopeAndAttribute(innerText) ?: return null
 
             val funcName = funcAggr.text.lowercase()
             val aggregationType = when {
@@ -287,13 +282,8 @@ class PqlQueryListener : QLParserBaseListener() {
             }
         }
 
-        val hasArithmetic = expr.children?.any {
-            it is org.antlr.v4.runtime.tree.TerminalNode &&
-                    (it.text == "+" || it.text == "-" || it.text == "*" || it.text == "/")
-        } ?: false
-
-        if (hasArithmetic) {
-            val arithmeticExpr = parseArithmeticExpression(expr) ?: return
+        val arithmeticExpr = parseArithmeticExpression(expr)
+        if (arithmeticExpr != null && arithmeticExpr !is PqlArithmeticExpression.Attribute && arithmeticExpr !is PqlArithmeticExpression.Literal) {
             val scope = extractScopeFromArithmetic(arithmeticExpr) ?: PqlScope.EVENT
             updateDetectedScope(scope)
             orderByList.add(PqlOrder(scope, expr.text, direction, arithmeticExpression = arithmeticExpr))
@@ -306,6 +296,8 @@ class PqlQueryListener : QLParserBaseListener() {
             val attrName = attribute.second
             updateDetectedScope(scope)
             orderByList.add(PqlOrder(scope, attrName, direction))
+        } else {
+            orderByList.add(PqlOrder(detectedScope ?: PqlScope.EVENT, expr.text, direction))
         }
     }
 
@@ -317,7 +309,6 @@ class PqlQueryListener : QLParserBaseListener() {
                 limitsMap[PqlScope.fromToken(parts[0])] = parts[1].toInt()
             } else {
                 val number = text.toInt()
-                limitsMap[detectedScope ?: PqlScope.EVENT] = number
                 if (limit == null) limit = number
             }
         } catch (e: Exception) {}
@@ -331,7 +322,6 @@ class PqlQueryListener : QLParserBaseListener() {
                 offsetsMap[PqlScope.fromToken(parts[0])] = parts[1].toInt()
             } else {
                 val number = text.toInt()
-                offsetsMap[detectedScope ?: PqlScope.EVENT] = number
                 if (offset == null) offset = number
             }
         } catch (e: Exception) {}
@@ -343,19 +333,26 @@ class PqlQueryListener : QLParserBaseListener() {
 
         ids.forEach { idToken ->
             val id = idToken.text
-            val (scope, attribute) = parseScopeAndAttribute(id) ?: return@forEach
+            val isLiteral = ctx.text.contains("[$id]")
+            val idToPass = if (isLiteral) "[$id]" else id
+
+            val (scope, attribute) = parseScopeAndAttribute(idToPass) ?: return@forEach
             updateDetectedScope(scope)
             groupByFields.add(PqlGroupByField(scope, attribute))
         }
     }
 
     private fun parseAttribute(ctx: QLParser.Arith_exprContext): Pair<PqlScope, String>? {
-        val id = ctx.ID()?.text ?: return null
-        return parseScopeAndAttribute(id)
+        if (ctx.ID() == null) return null
+        return parseScopeAndAttribute(ctx.text)
     }
 
     private fun parseScopeAndAttribute(id: String): Pair<PqlScope, String>? {
-        val trimmed = id.trim().removePrefix("[").removeSuffix("]")
+        val cleanId = id.trim()
+        val isLiteral = cleanId.startsWith("[") && cleanId.endsWith("]")
+
+        val trimmed = cleanId.removePrefix("[").removeSuffix("]")
+
         val hoistingPrefix = trimmed.takeWhile { it == '^' }
         val withoutHoisting = trimmed.drop(hoistingPrefix.length)
 
@@ -363,7 +360,8 @@ class PqlQueryListener : QLParserBaseListener() {
 
         if (parts.size == 1) {
             val scope = detectedScope ?: PqlScope.EVENT
-            return Pair(scope, hoistingPrefix + withoutHoisting)
+            val attr = hoistingPrefix + withoutHoisting
+            return Pair(scope, if (isLiteral) "[$attr]" else attr)
         }
 
         val possibleScopeToken = parts[0].lowercase()
@@ -376,13 +374,16 @@ class PqlQueryListener : QLParserBaseListener() {
         }
 
         if (parsedScope != null) {
-            if (possibleScopeToken == "c" || possibleScopeToken == "classifier") {
-                return Pair(PqlScope.EVENT, hoistingPrefix + withoutHoisting)
+            val attr = if (possibleScopeToken == "c" || possibleScopeToken == "classifier") {
+                hoistingPrefix + withoutHoisting
+            } else {
+                hoistingPrefix + parts[1]
             }
-            return Pair(parsedScope, hoistingPrefix + parts[1])
+            return Pair(parsedScope, if (isLiteral) "[$attr]" else attr)
         } else {
             val scope = detectedScope ?: PqlScope.EVENT
-            return Pair(scope, hoistingPrefix + withoutHoisting)
+            val attr = hoistingPrefix + withoutHoisting
+            return Pair(scope, if (isLiteral) "[$attr]" else attr)
         }
     }
 
@@ -584,11 +585,15 @@ class PqlQueryListener : QLParserBaseListener() {
     fun buildQuery(): PqlQuery {
         val isSelectAll = selectAll || projections.isEmpty()
 
-        val finalScope = if (projections.isEmpty()) {
+        val finalScope = if (projections.isEmpty() && groupByFields.isEmpty()) {
             PqlScope.EVENT
         } else {
-            val hasEvent = projections.any { it.scope == PqlScope.EVENT || it.allAttributes }
-            val hasTrace = projections.any { it.scope == PqlScope.TRACE }
+            val hasEvent = projections.any { it.scope == PqlScope.EVENT || it.allAttributes } ||
+                    groupByFields.any { it.scope == PqlScope.EVENT } ||
+                    orderByList.any { it.scope == PqlScope.EVENT }
+            val hasTrace = projections.any { it.scope == PqlScope.TRACE } ||
+                    groupByFields.any { it.scope == PqlScope.TRACE } ||
+                    orderByList.any { it.scope == PqlScope.TRACE }
             when {
                 hasEvent || isSelectAll -> PqlScope.EVENT
                 hasTrace -> PqlScope.TRACE

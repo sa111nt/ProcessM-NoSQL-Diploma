@@ -8,44 +8,31 @@ data class FieldPath(val segments: List<String>) {
 
 class PqlFieldMapper {
     private val standardAliases = mapOf(
-        // Identity & Concept & Time
         "id" to "identity:id",
         "name" to "concept:name",
         "instance" to "concept:instance",
         "timestamp" to "time:timestamp",
-
-        // Organizational & Lifecycle
         "resource" to "org:resource",
         "role" to "org:role",
         "group" to "org:group",
         "transition" to "lifecycle:transition",
         "state" to "lifecycle:state",
         "model" to "lifecycle:model",
-
-        // Cost (Pełna specyfikacja z repozytorium)
         "total" to "cost:total",
         "currency" to "cost:currency",
         "amount" to "cost:amount",
         "driver" to "cost:driver",
         "type" to "cost:type",
         "drivers" to "cost:drivers",
-
-        // Semantic & ArtifactLifecycle
         "modelreference" to "semantic:modelReference",
         "moves" to "artifactlifecycle:moves",
-
-        // Micro
         "level" to "micro:level",
         "parentid" to "micro:parentId",
         "length" to "micro:length",
-
-        // Software Communication
         "localhost" to "swcomm:localHost",
         "localport" to "swcomm:localPort",
         "remotehost" to "swcomm:remoteHost",
         "remoteport" to "swcomm:remotePort",
-
-        // Software Event (Kluczowe)
         "hasdata" to "swevent:hasData",
         "hasexception" to "swevent:hasException",
         "returnvalue" to "swevent:returnValue",
@@ -54,26 +41,24 @@ class PqlFieldMapper {
         "nanotime" to "swevent:nanotime",
         "exthrown" to "swevent:exThrown",
         "excaught" to "swevent:exCaught",
-
-        // Software Telemetry
         "cputotaluser" to "swtelemetry:cpuTotalUser",
         "cpuloaduser" to "swtelemetry:cpuLoadUser",
         "memoryused" to "swtelemetry:memoryUsed",
         "memorytotal" to "swtelemetry:memoryTotal",
-
-        // MetaData (Najczęściej używane z meta_general i meta_time)
         "traces_total" to "meta_general:traces_total",
         "events_total" to "meta_general:events_total",
         "events_average" to "meta_general:events_average",
         "log_duration" to "meta_time:log_duration",
         "duration_average" to "meta_time:duration_average",
-
-        // Systemowe XES
         "version" to "xes:version",
         "features" to "xes:features"
     )
 
     fun getStandardName(attribute: String): String {
+        if (attribute.startsWith("[")) {
+            return attribute
+        }
+
         val cleanAttr = attribute.removePrefix("^^").removePrefix("^")
         val lowerAttr = cleanAttr.lowercase()
 
@@ -87,6 +72,18 @@ class PqlFieldMapper {
     }
 
     fun resolve(scope: PqlScope, attribute: String): FieldPath {
+        val isLiteral = attribute.startsWith("[")
+
+        if (isLiteral) {
+            val clean = attribute.removePrefix("[").removeSuffix("]")
+                .removePrefix("e:").removePrefix("t:").removePrefix("l:")
+            return when (scope) {
+                PqlScope.LOG -> FieldPath(listOf("log_attributes", clean))
+                PqlScope.TRACE -> FieldPath(listOf("xes_attributes", clean))
+                PqlScope.EVENT -> FieldPath(listOf("xes_attributes", clean))
+            }
+        }
+
         val standardName = getStandardName(attribute).removePrefix("^^").removePrefix("^")
         val lowerName = standardName.lowercase()
 
@@ -126,8 +123,14 @@ class PqlFieldMapper {
     }
 
     fun resolveForCondition(conditionScope: PqlScope, collectionScope: PqlScope, attribute: String): FieldPath {
+        val isLiteral = attribute.startsWith("[")
+        if (isLiteral) {
+            return resolve(conditionScope, attribute)
+        }
+
         val cleanAttr = attribute.removePrefix("[").removeSuffix("]")
         val strippedAttr = cleanAttr.removePrefix("e:").removePrefix("t:").removePrefix("l:")
+
         val standardName = getStandardName(strippedAttr).removePrefix("^^").removePrefix("^")
         val lowerName = standardName.lowercase()
 

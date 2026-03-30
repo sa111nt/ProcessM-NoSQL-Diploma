@@ -54,15 +54,20 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
         throw NoSuchElementException()
     }
 
-    private fun parseAttribute(prefix: String = ""): List<Pair<String, Any?>> {
+    private fun parseAttribute(prefixPath: String = "", typePrefix: String = ""): List<Triple<String, Any?, String>> {
         val tag = reader.localName
         val rawKey = reader.getAttributeValue(null, "key") ?: "unknown"
-        val key = if (prefix.isEmpty()) rawKey else "$prefix:$rawKey"
-        val results = mutableListOf<Pair<String, Any?>>()
+
+        val flatKey = if (prefixPath.isEmpty()) rawKey else "$prefixPath:$rawKey"
+
+        val currentTypeNode = "$tag[$rawKey]"
+        val currentTypeChain = if (typePrefix.isEmpty()) currentTypeNode else "$typePrefix|$currentTypeNode"
+
+        val results = mutableListOf<Triple<String, Any?, String>>()
 
         if (tag in primitiveTypes) {
             val value = castValue(tag, reader.getAttributeValue(null, "value"))
-            results.add(key to value)
+            results.add(Triple(flatKey, value, currentTypeChain))
         }
 
         while (reader.hasNext()) {
@@ -70,7 +75,7 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
             if (reader.isStartElement) {
                 val childTag = reader.localName
                 if (childTag in primitiveTypes || childTag == "list" || childTag == "container") {
-                    results.addAll(parseAttribute(key))
+                    results.addAll(parseAttribute(flatKey, currentTypeChain))
                 }
             } else if (reader.isEndElement && reader.localName == tag) {
                 break
@@ -81,6 +86,7 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
 
     private fun parseLogHeader(): XESLogAttributes {
         val attributes = mutableMapOf<String, Any?>()
+        val types = mutableMapOf<String, String>()
         val extensions = mutableListOf<XesExtension>()
         val globals = mutableListOf<XesGlobal>()
         val classifiersDef = mutableListOf<XesClassifier>()
@@ -119,19 +125,23 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
                     classifiersDef.add(XesClassifier(cName, keysList))
                     classifiersMap[cName] = keysList
                 } else if (name in primitiveTypes || name == "list" || name == "container") {
-                    parseAttribute().forEach { attributes[it.first] = it.second }
+                    parseAttribute().forEach {
+                        attributes[it.first] = it.second
+                        types[it.first] = it.third
+                    }
                 } else if (name == "trace") {
-                    return XESLogAttributes(attributes, extensions, globals, classifiersDef, classifiersMap)
+                    return XESLogAttributes(attributes, extensions, globals, classifiersDef, classifiersMap, types)
                 }
             } else if (reader.isEndElement && reader.localName == "log") {
-                return XESLogAttributes(attributes, extensions, globals, classifiersDef, classifiersMap)
+                return XESLogAttributes(attributes, extensions, globals, classifiersDef, classifiersMap, types)
             }
         }
-        return XESLogAttributes(attributes, extensions, globals, classifiersDef, classifiersMap)
+        return XESLogAttributes(attributes, extensions, globals, classifiersDef, classifiersMap, types)
     }
 
     private fun parseTrace(): Trace {
         val traceAttributes = mutableMapOf<String, Any?>()
+        val traceTypes = mutableMapOf<String, String>()
         val events = mutableListOf<Event>()
         val currentTraceId = UUID.randomUUID()
 
@@ -142,6 +152,7 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
                 if (name in primitiveTypes || name == "list" || name == "container") {
                     parseAttribute().forEach { attr ->
                         traceAttributes[attr.first] = attr.second
+                        traceTypes[attr.first] = attr.third
                     }
                 } else if (name == "event") {
                     events.add(parseEvent(currentTraceId))
@@ -152,12 +163,14 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
         return Trace(
             id = currentTraceId,
             attributes = traceAttributes,
+            types = traceTypes,
             events = events
         )
     }
 
     private fun parseEvent(traceId: UUID): Event {
         val attrs = mutableMapOf<String, Any?>()
+        val eventTypes = mutableMapOf<String, String>()
         var name: String? = null
         var timestamp: String? = null
 
@@ -173,6 +186,7 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
                             "time:timestamp" -> timestamp = attr.second?.toString()
                         }
                         attrs[attr.first] = attr.second
+                        eventTypes[attr.first] = attr.third
                     }
                 }
             } else if (reader.isEndElement && reader.localName == "event") reading = false
@@ -183,7 +197,8 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
             traceId = traceId,
             name = name,
             timestamp = timestamp,
-            attributes = attrs
+            attributes = attrs,
+            types = eventTypes
         )
     }
 
@@ -192,14 +207,14 @@ class StaxXesParser(private val reader: XMLStreamReader) : XESInputStream {
         return try {
             when (tag) {
                 "string", "date" -> value
-                "id" -> UUID.fromString(value)
+                "id" -> try { java.util.UUID.fromString(value) } catch (e: Exception) { value }
                 "int" -> value.toLong()
                 "float" -> value.toDouble()
                 "boolean" -> value.toBooleanStrict()
                 else -> value
             }
         } catch (e: Exception) {
-            if (tag == "id") null else value
+            value
         }
     }
 }
