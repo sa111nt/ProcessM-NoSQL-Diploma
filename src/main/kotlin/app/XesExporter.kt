@@ -6,7 +6,6 @@ import com.google.gson.JsonParser
 import db.CouchDBManager
 import java.io.File
 import java.io.Writer
-import java.util.UUID
 
 class XesExporter(private val dbManager: CouchDBManager, private val dbName: String) {
 
@@ -32,7 +31,7 @@ class XesExporter(private val dbManager: CouchDBManager, private val dbName: Str
         }
 
         eventsByTrace.values.forEach { eventList ->
-            eventList.sortBy { getTimestampOrEmpty(it) }
+            eventList.sortBy { it.get("eventIndex")?.takeIf { !it.isJsonNull }?.asInt ?: 0 }
         }
 
         val file = File(outputFilePath)
@@ -180,12 +179,6 @@ class XesExporter(private val dbManager: CouchDBManager, private val dbName: Str
         return try {
             s.length >= 32 && s.contains("-")
         } catch (e: Exception) { false }
-    }
-
-    private fun getTimestampOrEmpty(eventObj: JsonObject): String {
-        return eventObj.get("timestamp")?.takeIf { !it.isJsonNull }?.asString
-            ?: eventObj.getAsJsonObject("xes_attributes")?.get("time:timestamp")?.takeIf { !it.isJsonNull }?.asString
-            ?: ""
     }
 
     private fun escapeXml(input: String): String {

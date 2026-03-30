@@ -22,6 +22,7 @@ class XesExporterTest {
     private val outputIdentityPath = "src/test/resources/exported_identity_test.xes"
     private val outputDeletePath = "src/test/resources/exported_delete_test.xes"
     private val outputLargePath = "src/test/resources/exported_large_test.xes"
+    private val outputOrderTestPath = "src/test/resources/exported_order_test.xes"
 
     @BeforeAll
     fun setup() {
@@ -291,6 +292,59 @@ class XesExporterTest {
         assertEquals(originalEventsCount, exportedEventsCount)
 
         exportFile.delete()
+        try { dbManager.deleteDb(dbName); dbManager.createDb(dbName) } catch (e: Exception) {}
+    }
+
+    @Test
+    fun testEventOrderPreservationWithTiedTimestamps() {
+        try { dbManager.deleteDb(dbName); dbManager.createDb(dbName) } catch (e: Exception) {}
+
+        val orderTestInputPath = "src/test/resources/order_test_input.xes"
+        val xml = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <log xes.version="1.0" xmlns="http://www.xes-standard.org/">
+              <trace>
+                <string key="concept:name" value="Tied_Timestamp_Trace"/>
+                <event>
+                  <string key="concept:name" value="A_First_Action"/>
+                  <date key="time:timestamp" value="2023-01-01T12:00:00Z"/>
+                </event>
+                <event>
+                  <string key="concept:name" value="B_Second_Action"/>
+                  <date key="time:timestamp" value="2023-01-01T12:00:00Z"/>
+                </event>
+                <event>
+                  <string key="concept:name" value="C_Third_Action"/>
+                  <date key="time:timestamp" value="2023-01-01T12:00:00Z"/>
+                </event>
+              </trace>
+            </log>
+        """.trimIndent()
+        File(orderTestInputPath).writeText(xml)
+
+        LogImporter.import(orderTestInputPath, dbName, dbManager)
+        val logId = getLogIdFromDb()
+
+        exporter.exportToFile(logId, outputOrderTestPath)
+        val exportedFile = File(outputOrderTestPath)
+        assertTrue(exportedFile.exists())
+
+        val exportedXes = parseXesToModel(outputOrderTestPath)
+        assertEquals(1, exportedXes.traces.size)
+
+        val exportedEvents = exportedXes.traces.first().events
+        assertEquals(3, exportedEvents.size)
+
+        val name1 = exportedEvents[0].attributes.find { it.key == "concept:name" }?.value
+        val name2 = exportedEvents[1].attributes.find { it.key == "concept:name" }?.value
+        val name3 = exportedEvents[2].attributes.find { it.key == "concept:name" }?.value
+
+        assertEquals("A_First_Action", name1)
+        assertEquals("B_Second_Action", name2)
+        assertEquals("C_Third_Action", name3)
+
+        File(orderTestInputPath).delete()
+        exportedFile.delete()
         try { dbManager.deleteDb(dbName); dbManager.createDb(dbName) } catch (e: Exception) {}
     }
 
