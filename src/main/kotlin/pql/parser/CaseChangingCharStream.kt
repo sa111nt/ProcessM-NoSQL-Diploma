@@ -18,13 +18,11 @@ class CaseChangingCharStream(
 
     override fun LA(i: Int): Int {
         val c = stream.LA(i)
-        if (c <= 0) {
-            return c
-        }
-        if (!upper) {
-            return Character.toLowerCase(c)
-        }
-        return Character.toUpperCase(c)
+
+        // "All keywords, identifiers, and comparisons with values in PQL are case-sensitive."
+        // We are supposed to preserve the original case to strictly comply with the PQL specification,
+        // so this wrapper acts as a pure pass-through and does not modify the characters.
+        return c
     }
 
     override fun mark(): Int {

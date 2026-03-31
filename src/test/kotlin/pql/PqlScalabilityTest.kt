@@ -59,8 +59,7 @@ class PqlScalabilityTest {
         val benchmarkQueries = listOf(
             "Q1_Projection"      to "select e:concept:name limit {LIMIT}",
             "Q2_ZeroCpuFilter"   to "select e:concept:name where e:concept:name = 'NON_EXISTENT_EVENT' limit {LIMIT}",
-            "Q3_RegexFilter"     to "select e:concept:name where e:concept:name MATCHES '.*(A_).*' limit {LIMIT}",
-            "Q4_CrossScope"      to "select e:concept:name where t:concept:name = 'Trace_1' limit {LIMIT}",
+            "Q3_RegexFilter"     to "select e:concept:name where e:concept:name matches '.*(A_).*' limit {LIMIT}",            "Q4_CrossScope"      to "select e:concept:name where t:concept:name = 'Trace_1' limit {LIMIT}",
             "Q5_GlobalAggr"      to "select count(e:concept:name), min(e:time:timestamp)",
             "Q6_Sorting"         to "select e:concept:name order by e:time:timestamp desc limit {LIMIT}",
             "Q7_FlatGroupBy"     to "select e:concept:name, count(e:time:timestamp) group by e:concept:name limit {LIMIT}",

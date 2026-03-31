@@ -1,5 +1,6 @@
 package app
 
+import com.google.gson.GsonBuilder
 import db.CouchDBManager
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
@@ -19,6 +20,7 @@ class PqlEvaluationTest {
     private lateinit var interpreter: PqlInterpreter
     private val dbName = "pql_evaluation_test_db"
     private val testXesPath = "src/test/resources/pql_evaluation_log.xes"
+    private val gson = GsonBuilder().setPrettyPrinting().create()
 
     @BeforeAll
     fun setup() {
@@ -61,8 +63,13 @@ class PqlEvaluationTest {
     }
 
     private fun evaluateQuery(query: String) {
+        println("==================================================")
+        println("QUERY: $query")
+        println("--------------------------------------------------")
         val result = interpreter.executeQuery(query)
         assertNotNull(result)
+        println(gson.toJson(result))
+        println("==================================================\n")
     }
 
     @Test

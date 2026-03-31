@@ -864,8 +864,7 @@ class PqlInterpreterTest {
     @Test
     fun syntaxErrorReporting() {
         val ex = assertFailsWith<IllegalArgumentException> {
-            interpreter.executeQuery("SELECT * FROM NIEZNANA_SKLADNIA_BEZ_SENSE WHERE").asJsonArray
-        }
+            interpreter.executeQuery("select * from nieznana_skladnia_bez_sensu where").asJsonArray        }
         val msg = ex.message ?: ""
         assertTrue(msg.contains("Parse error", ignoreCase = true) || msg.contains("Syntax error", ignoreCase = true))
     }

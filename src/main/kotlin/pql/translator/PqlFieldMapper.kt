@@ -60,13 +60,12 @@ class PqlFieldMapper {
         }
 
         val cleanAttr = attribute.removePrefix("^^").removePrefix("^")
-        val lowerAttr = cleanAttr.lowercase()
 
-        if (lowerAttr.startsWith("c:") || lowerAttr.startsWith("classifier:")) {
+        if (cleanAttr.startsWith("c:") || cleanAttr.startsWith("classifier:")) {
             return attribute
         }
 
-        val resolved = standardAliases[lowerAttr] ?: cleanAttr
+        val resolved = standardAliases[cleanAttr] ?: cleanAttr
         val hoistingPrefix = attribute.takeWhile { it == '^' }
         return hoistingPrefix + resolved
     }
@@ -85,9 +84,8 @@ class PqlFieldMapper {
         }
 
         val standardName = getStandardName(attribute).removePrefix("^^").removePrefix("^")
-        val lowerName = standardName.lowercase()
 
-        if (lowerName == "identity:id") {
+        if (standardName == "identity:id") {
             return when (scope) {
                 PqlScope.LOG -> FieldPath(listOf("log_attributes", "identity:id"))
                 PqlScope.TRACE -> FieldPath(listOf("xes_attributes", "identity:id"))
@@ -95,11 +93,11 @@ class PqlFieldMapper {
             }
         }
 
-        if (lowerName == "_id" || lowerName == "logid" || lowerName == "traceid" || lowerName == "source" || lowerName == "importtimestamp") {
+        if (standardName == "_id" || standardName == "logId" || standardName == "traceId" || standardName == "source" || standardName == "importTimestamp") {
             return FieldPath(listOf(standardName))
         }
 
-        if (lowerName == "concept:name") {
+        if (standardName == "concept:name") {
             return when (scope) {
                 PqlScope.EVENT -> FieldPath(listOf("activity"))
                 PqlScope.TRACE -> FieldPath(listOf("xes_attributes", "concept:name"))
@@ -107,7 +105,7 @@ class PqlFieldMapper {
             }
         }
 
-        if (lowerName == "time:timestamp") {
+        if (standardName == "time:timestamp") {
             return when (scope) {
                 PqlScope.EVENT -> FieldPath(listOf("timestamp"))
                 PqlScope.TRACE -> FieldPath(listOf("xes_attributes", "time:timestamp"))
@@ -132,9 +130,8 @@ class PqlFieldMapper {
         val strippedAttr = cleanAttr.removePrefix("e:").removePrefix("t:").removePrefix("l:")
 
         val standardName = getStandardName(strippedAttr).removePrefix("^^").removePrefix("^")
-        val lowerName = standardName.lowercase()
 
-        if (lowerName == "_id") {
+        if (standardName == "_id") {
             return if (conditionScope == collectionScope) FieldPath(listOf("_id"))
             else if (conditionScope == PqlScope.LOG) FieldPath(listOf("logId"))
             else if (conditionScope == PqlScope.TRACE) FieldPath(listOf("traceId"))
@@ -150,9 +147,9 @@ class PqlFieldMapper {
     }
 
     fun getImplicitClassifierMapping(classifierBase: String): List<String> {
-        return when (classifierBase.lowercase()) {
-            "event name" -> listOf("concept:name", "lifecycle:transition")
-            "resource" -> listOf("org:resource")
+        return when (classifierBase) {
+            "Event Name" -> listOf("concept:name", "lifecycle:transition")
+            "Resource" -> listOf("org:resource")
             else -> listOf(getStandardName(classifierBase))
         }
     }
