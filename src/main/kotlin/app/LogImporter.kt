@@ -16,7 +16,8 @@ object LogImporter {
     fun import(
         filePath: String,
         targetDbName: String = "event_logs",
-        providedManager: CouchDBManager? = null
+        providedManager: CouchDBManager? = null,
+        denormalizeEvents: Boolean = true // FOR TESTING
     ) {
         val file = File(filePath)
 
@@ -31,11 +32,11 @@ object LogImporter {
         try {
             when (type) {
                 LogFileType.XES -> {
-                    importStream(file.inputStream(), couch, targetDbName)
+                    importStream(file.inputStream(), couch, targetDbName, denormalizeEvents)
                 }
                 LogFileType.GZ -> {
                     GZIPInputStream(file.inputStream()).use { gzipStream ->
-                        importStream(gzipStream, couch, targetDbName)
+                        importStream(gzipStream, couch, targetDbName, denormalizeEvents)
                     }
                 }
                 LogFileType.ZIP -> {
@@ -43,7 +44,7 @@ object LogImporter {
                         var entry = zipStream.nextEntry
                         while (entry != null) {
                             if (!entry.isDirectory && entry.name.endsWith(".xes", ignoreCase = true)) {
-                                importStream(zipStream, couch, targetDbName)
+                                importStream(zipStream, couch, targetDbName, denormalizeEvents)
                             }
                             entry = zipStream.nextEntry
                         }
@@ -60,11 +61,21 @@ object LogImporter {
         }
     }
 
-    private fun importStream(inputStream: InputStream, couch: CouchDBManager, dbName: String) {
+    private fun importStream(
+        inputStream: InputStream,
+        couch: CouchDBManager,
+        dbName: String,
+        denormalizeEvents: Boolean
+    ) {
         val xmlReader = XMLInputFactory.newDefaultFactory().createXMLStreamReader(inputStream)
         val parser = StaxXesParser(xmlReader)
 
-        val mapper = StreamingXesToCouchDBMapper(couch, dbName, parallelism = 6)
+        val mapper = StreamingXesToCouchDBMapper(
+            couch,
+            dbName,
+            parallelism = 6,
+            denormalizeEvents = denormalizeEvents
+        )
         mapper.map(parser)
 
         couch.ensureIndex(dbName, listOf("docType"))

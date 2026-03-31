@@ -19,7 +19,8 @@ class StreamingXesToCouchDBMapper(
     private val couchDB: CouchDBManager,
     private val databaseName: String,
     private val batchSize: Int = 2500,
-    private val parallelism: Int = 4
+    private val parallelism: Int = 4,
+    private val denormalizeEvents: Boolean = true // FOR TESTING
 ) {
 
     fun map(parser: Iterator<XESComponent>) {
@@ -176,21 +177,23 @@ class StreamingXesToCouchDBMapper(
         writer.name("timestamp").value(event.timestamp)
         writer.name("eventIndex").value(index)
 
-        val logName = logAttr?.attributes?.get("concept:name")?.toString() ?: logId
-        writer.name("l:concept:name").value(logName)
+        if (denormalizeEvents) {
+            val logName = logAttr?.attributes?.get("concept:name")?.toString() ?: logId
+            writer.name("l:concept:name").value(logName)
 
-        val traceName = trace.attributes["concept:name"]?.toString() ?: trace.id.toString()
-        writer.name("t:concept:name").value(traceName)
+            val traceName = trace.attributes["concept:name"]?.toString() ?: trace.id.toString()
+            writer.name("t:concept:name").value(traceName)
 
-        val classifiers = logAttr?.classifiers ?: emptyMap()
-        for ((cName, cKeys) in classifiers) {
-            val cValues = cKeys.mapNotNull { key ->
-                event.attributes[key]?.toString()
-                    ?: trace.attributes[key]?.toString()
-                    ?: logAttr?.attributes?.get(key)?.toString()
-            }
-            if (cValues.isNotEmpty()) {
-                writer.name("c:$cName").value(cValues.joinToString("+"))
+            val classifiers = logAttr?.classifiers ?: emptyMap()
+            for ((cName, cKeys) in classifiers) {
+                val cValues = cKeys.mapNotNull { key ->
+                    event.attributes[key]?.toString()
+                        ?: trace.attributes[key]?.toString()
+                        ?: logAttr?.attributes?.get(key)?.toString()
+                }
+                if (cValues.isNotEmpty()) {
+                    writer.name("c:$cName").value(cValues.joinToString("+"))
+                }
             }
         }
 
